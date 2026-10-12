@@ -1,0 +1,5 @@
+{
+  "name": "commit-message",
+  "description": "Writes a git commit message for the staged changes. Use when the user asks to commit, or asks for a commit message.",
+  "version": "1.0.0"
+}
