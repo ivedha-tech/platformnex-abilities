@@ -1,0 +1,16 @@
+{
+  "name": "ccw-workflow",
+  "description": "Claude Code Workflow (CCW): planning, execution, review, testing, issue and team-orchestration workflows with their agents and commands. Needs the ccw CLI (npm i -g claude-code-workflow); some skills also use the Gemini, Qwen or Codex CLIs.",
+  "version": "7.3.14",
+  "author": {
+    "name": "catlog22"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/catlog22/Claude-Code-Workflow",
+  "keywords": [
+    "workflow",
+    "planning",
+    "review",
+    "agents"
+  ]
+}
