@@ -7,16 +7,85 @@
   "forceRemoveDeletedPlugins": true,
   "plugins": [
     {
-      "name": "brandkit",
-      "source": "./plugins/brandkit",
-      "description": "Premium brand-kit image generation skill for creating high-end brand-guidelines boards, logo systems, identity decks, and visual-world presentations. Trained for minimalist, cinematic, editorial, dark-tech, luxury, cultural, security, gaming, developer-tool, and consumer-app brand systems. Optimized for intentional logo concepting, refined composition, sparse typography, strong symbolic meaning, premium mockups, art-directed imagery, and flexible grid layouts.",
+      "name": "bencium-ux",
+      "source": "./plugins/bencium-ux",
+      "description": "Bencium UX and architecture skills: controlled, innovative and impact UX design, design audits, typography, agentic UX, AEO content, adaptive communication and architecture thinking lenses.",
       "version": "1.0.0"
+    },
+    {
+      "name": "ccw-workflow",
+      "source": "./plugins/ccw-workflow",
+      "description": "Claude Code Workflow (CCW): planning, execution, review, testing, issue and team-orchestration workflows with their agents and commands. Needs the ccw CLI (npm i -g claude-code-workflow); some skills also use the Gemini, Qwen or Codex CLIs.",
+      "version": "7.3.14"
     },
     {
       "name": "commit-message",
       "source": "./plugins/commit-message",
       "description": "Writes a git commit message for the staged changes. Use when the user asks to commit, or asks for a commit message.",
       "version": "1.0.0"
+    },
+    {
+      "name": "design-taste",
+      "source": "./plugins/design-taste",
+      "description": "Taste skills for frontend design: anti-generic landing pages, premium visual design, minimalist and brutalist UI, redesigns, image-to-code, brand kits and DESIGN.md libraries.",
+      "version": "1.0.0"
+    },
+    {
+      "name": "frontend-design",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/frontend-design",
+        "ref": "main",
+        "sha": "f359d43b406057f1a8cdbc4ea93b827642c162e6"
+      },
+      "description": "Anthropic’s frontend design skill: distinctive, production-grade interfaces that avoid generic AI aesthetics.",
+      "author": {
+        "name": "Anthropic",
+        "email": "support@anthropic.com"
+      }
+    },
+    {
+      "name": "hookify",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/hookify",
+        "ref": "main",
+        "sha": "f359d43b406057f1a8cdbc4ea93b827642c162e6"
+      },
+      "description": "Anthropic’s hookify: create custom hooks from markdown rules to prevent unwanted behaviours. Runs python3 hooks on every prompt, tool call and stop.",
+      "author": {
+        "name": "Anthropic",
+        "email": "support@anthropic.com"
+      }
+    },
+    {
+      "name": "platformnex-connector",
+      "source": "./plugins/platformnex-connector",
+      "description": "Rules for adding or reviewing a PlatformNEX connector in platformnex-gateway: domain layering, the plugin scaffold, WIF-first credentials and env-only secrets.",
+      "version": "1.0.0"
+    },
+    {
+      "name": "playwright-skill",
+      "source": "./plugins/playwright-skill",
+      "description": "General-purpose browser automation with Playwright: detects dev servers, writes test scripts to /tmp, fills forms, takes screenshots and checks responsive layouts.",
+      "version": "4.1.0"
+    },
+    {
+      "name": "plugin-dev",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/plugin-dev",
+        "ref": "main",
+        "sha": "f359d43b406057f1a8cdbc4ea93b827642c162e6"
+      },
+      "description": "Anthropic’s plugin development toolkit: skills for agents, commands, hooks, MCP integrations, plugin structure and settings, plus agents that create and validate plugins.",
+      "author": {
+        "name": "Anthropic",
+        "email": "support@anthropic.com"
+      }
     }
   ]
 }

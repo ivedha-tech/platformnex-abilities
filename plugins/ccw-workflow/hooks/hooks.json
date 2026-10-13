@@ -1,0 +1,25 @@
+{
+  "description": "CCW session tracking: injects skill context on each prompt and records coordinator progress when a turn ends. Does nothing when the ccw CLI isn’t installed.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v ccw >/dev/null 2>&1 || exit 0; ccw hook template exec ccw-coordinator-skill-context --stdin"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v ccw >/dev/null 2>&1 || exit 0; ccw hook template exec ccw-coordinator-tracker --stdin"
+          }
+        ]
+      }
+    ]
+  }
+}
