@@ -31,6 +31,36 @@
       "version": "1.0.0"
     },
     {
+      "name": "frontend-design",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/frontend-design",
+        "ref": "main",
+        "sha": "f359d43b406057f1a8cdbc4ea93b827642c162e6"
+      },
+      "description": "Anthropic’s frontend design skill: distinctive, production-grade interfaces that avoid generic AI aesthetics.",
+      "author": {
+        "name": "Anthropic",
+        "email": "support@anthropic.com"
+      }
+    },
+    {
+      "name": "hookify",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/hookify",
+        "ref": "main",
+        "sha": "f359d43b406057f1a8cdbc4ea93b827642c162e6"
+      },
+      "description": "Anthropic’s hookify: create custom hooks from markdown rules to prevent unwanted behaviours. Runs python3 hooks on every prompt, tool call and stop.",
+      "author": {
+        "name": "Anthropic",
+        "email": "support@anthropic.com"
+      }
+    },
+    {
       "name": "platformnex-connector",
       "source": "./plugins/platformnex-connector",
       "description": "Rules for adding or reviewing a PlatformNEX connector in platformnex-gateway: domain layering, the plugin scaffold, WIF-first credentials and env-only secrets.",
@@ -41,6 +71,21 @@
       "source": "./plugins/playwright-skill",
       "description": "General-purpose browser automation with Playwright: detects dev servers, writes test scripts to /tmp, fills forms, takes screenshots and checks responsive layouts.",
       "version": "4.1.0"
+    },
+    {
+      "name": "plugin-dev",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/plugin-dev",
+        "ref": "main",
+        "sha": "f359d43b406057f1a8cdbc4ea93b827642c162e6"
+      },
+      "description": "Anthropic’s plugin development toolkit: skills for agents, commands, hooks, MCP integrations, plugin structure and settings, plus agents that create and validate plugins.",
+      "author": {
+        "name": "Anthropic",
+        "email": "support@anthropic.com"
+      }
     }
   ]
 }
