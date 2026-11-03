@@ -1,0 +1,14 @@
+{
+  "name": "pnx-fast-dev",
+  "description": "PlatformNEX fast development: keeps the pnx CLI installed and up to date (a SessionStart check at most once a day, installing in the background), and teaches Claude to run an app against a real non-production environment with pnx dev intercept, connect and env.",
+  "version": "1.0.0",
+  "author": {
+    "name": "ivedha"
+  },
+  "repository": "https://github.com/ivedha-tech/platformnex-gateway",
+  "keywords": [
+    "platformnex",
+    "pnx",
+    "fast-dev"
+  ]
+}
