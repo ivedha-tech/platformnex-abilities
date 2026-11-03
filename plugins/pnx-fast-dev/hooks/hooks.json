@@ -1,0 +1,16 @@
+{
+  "description": "Keeps the pnx CLI installed and current: at most once a day, when Claude Code starts, installs or updates @platformnex/pnx from the organization's private npm registry in the background. Never blocks the session; says one line when it can't.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/ensure-pnx.sh\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
