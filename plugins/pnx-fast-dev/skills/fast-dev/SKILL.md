@@ -1,6 +1,6 @@
 ---
 name: fast-dev
-description: Run or debug a service locally against a real non-production environment (dit1) with PlatformNEX's pnx CLI, without a build or deploy; preview a pull request at its own URL; or open, tunnel to or dump a component's database. Use when the user wants to try a change against dit1, see their local frontend or backend on the real dit1 URL, get an environment's settings and secrets locally, preview a pull request, reach a dit database (psql, a GUI, a dump), or asks about "pnx", "fast development", "intercept", "connect", "preview" or "pnx dev db".
+description: Set up all of a System's components on this machine and run them ("set up forcenex", "run it locally"); run or debug a service locally against a real non-production environment (dit1) with PlatformNEX's pnx CLI, without a build or deploy; preview a pull request at its own URL; or open, tunnel to or dump a component's database. Use when the user wants to try a change against dit1, see their local frontend or backend on the real dit1 URL, get an environment's settings and secrets locally, preview a pull request, reach a dit database (psql, a GUI, a dump), or asks to set up a System's components, clone its repositories, get it ready to run or run it locally, or asks about "pnx", "fast development", "intercept", "connect", "preview" or "pnx dev db".
 ---
 
 # Fast development with pnx
@@ -9,10 +9,12 @@ description: Run or debug a service locally against a real non-production enviro
 
 ## Choose the command
 
-Run these **in the component's own repository folder** (they read its `package.json`).
+**A whole System** ("set up forcenex", "get X ready to run locally", then "run locally"): use `pnx dev setup` and `pnx dev run`, from the folder where the user keeps their repositories (not inside a component's repository). **Single component:** run the commands below in that component's own repository folder (they read its `package.json`).
 
 | The user wants | Command |
 |---|---|
+| A System's components on this machine: its folder, every repository cloned, dependencies installed, each `.env` written | `pnx dev setup <system> --env dit1` (`--only a,b` for some; safe to repeat) |
+| Those components started, each connected to the environment | `pnx dev run <system>` (`--only a,b`; `--intercept` to intercept instead of connect; Ctrl-C stops all) |
 | Their requests on the real environment URL to reach their local app (frontend or backend), everyone else unaffected | `pnx dev intercept <component> --env <env>` |
 | Their local app to call the environment's real services (tunnels, settings, secrets in memory) | `pnx dev connect <component> --env <env> -- <command>` |
 | A `.env` with the environment's settings **and secrets** for an IDE or another tool | `pnx dev env <component> --env <env>` (0600, git-ignored; `pnx dev env --clean` deletes it) |
@@ -25,6 +27,14 @@ Run these **in the component's own repository folder** (they read its `package.j
 | Check or fix the machine | `pnx dev doctor`, `pnx dev doctor --fix` |
 
 `<component>` is the PlatformNEX component name (for example `forcenex-backend`), `<env>` usually `dit1`.
+
+## Setting up and running a System
+
+When the user says "set up `<system>`'s components" (or similar): run `pnx dev setup <system> --env dit1` (use another `<env>` only if they name one). It creates `./<system>/`, clones every component's repository into it, installs dependencies, and writes each component's `.env` (with secrets, 0600, git-ignored). Tell them it clones with their own GitHub credentials. When it finishes, report which components are ready and read out any it flagged (no repository in the catalog, clone or install failed, secrets it couldn't read). Don't try to fix a flagged component by hand-cloning it unless they ask; a missing repository is fixed in PlatformNEX.
+
+When they say "run locally" (or "start it"): run `pnx dev run <system>` **in the background** from the same folder as setup, then tell them which components started and on which ports (it prints them, labelled `[component]`). Output of every component is mixed in one stream; read it to answer questions about a specific one. Ctrl-C (or stopping the background task) ends all sessions. Each component is its own session on the environment, so `You already have a session` or a per-person limit message for the second component means the environment's per-person limit is lower than the number of components: tell them an admin can raise it in Administration › Environments, or use `--only` to run fewer.
+
+Components talk to the environment's services through tunnels (as with Connect), not to each other on localhost. To see a local frontend work against a local backend, use intercept on both (`--intercept`) or point the frontend at the backend's local port in its `.env`.
 
 ## Intercept
 
