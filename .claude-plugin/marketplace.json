@@ -91,7 +91,7 @@
       "name": "pnx-fast-dev",
       "source": "./plugins/pnx-fast-dev",
       "description": "PlatformNEX fast development: keeps the pnx CLI installed and current (SessionStart, once a day, in the background) and teaches Claude to use pnx dev intercept, connect and env against a non-production environment, preview pull requests (pnx dev preview) reach its databases (pnx dev db), and set up and run all of a System's components (pnx dev setup, pnx dev run).",
-      "version": "1.2.3"
+      "version": "1.2.4"
     }
   ]
 }

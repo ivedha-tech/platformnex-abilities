@@ -32,6 +32,8 @@ description: Set up, install or run a PlatformNEX System or one of its component
 
 **"install / set up / run `<name>` locally"** (a System such as speakupnex or scalenex, or one component) is this skill's job. Use `pnx`; do **not** go looking through GitHub or the machine for some other installer or repository that happens to match the name (a `*-claude-agents` repo, an `install-local.sh`, an app repo). If `pnx` says it knows no System or component of that name, ask the user what they meant; never guess a neighbour.
 
+**First, check pnx is new enough.** Run `pnx help | grep "pnx dev setup"`. No output (or `pnx` not found) means pnx is missing or too old for these commands. Check `node -v`: pnx needs Node 20 or later; on an older Node, tell the user and offer `nvm install 22 && nvm alias default 22` (it changes their default Node, so ask before running it). Then update pnx: `npm config set @platformnex:registry https://us-central1-npm.pkg.dev/ivedha-mgmt-env-nonprod/platformnex-npm/ && npx --yes google-artifactregistry-auth && npm i -g @platformnex/pnx@latest` (needs `gcloud auth application-default login` done once). Don't try to work around an old pnx with guessed `pnx dev up` calls.
+
 **Never assume which components. Ask first, every time:**
 1. Run `pnx dev setup <name> --env dit1 --list` (read-only, clones nothing). It prints the components with their repository and folder, and names any with no repository.
 2. Show the user that list and ask which components they want: all, or named ones. A single component they named exactly needs no question, but still say what you're about to do.
