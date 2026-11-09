@@ -1,6 +1,6 @@
 ---
 name: fast-dev
-description: Set up all of a System's components on this machine and run them ("set up forcenex", "run it locally"); run or debug a service locally against a real non-production environment (dit1) with PlatformNEX's pnx CLI, without a build or deploy; preview a pull request at its own URL; or open, tunnel to or dump a component's database. Use when the user wants to try a change against dit1, see their local frontend or backend on the real dit1 URL, get an environment's settings and secrets locally, preview a pull request, reach a dit database (psql, a GUI, a dump), or asks to set up a System's components, clone its repositories, get it ready to run or run it locally, or asks about "pnx", "fast development", "intercept", "connect", "preview" or "pnx dev db".
+description: Set up, install or run a PlatformNEX System or one of its components on this machine ("install speakupnex locally", "set up forcenex", "get forcenex-backend running locally", "run it locally"); run or debug a service locally against a real non-production environment (dit1) with PlatformNEX's pnx CLI, without a build or deploy; preview a pull request at its own URL; or open, tunnel to or dump a component's database. Use when the user wants to try a change against dit1, see their local frontend or backend on the real dit1 URL, get an environment's settings and secrets locally, preview a pull request, reach a dit database (psql, a GUI, a dump), or asks to install, set up, clone, get ready or run a System (any PlatformNEX System name, e.g. speakupnex, forcenex, servicenex) or one component locally, or asks to set up a System's components, clone its repositories, get it ready to run or run it locally, or asks about "pnx", "fast development", "intercept", "connect", "preview" or "pnx dev db".
 ---
 
 # Fast development with pnx
@@ -9,7 +9,7 @@ description: Set up all of a System's components on this machine and run them ("
 
 ## Choose the command
 
-**A whole System** ("set up forcenex", "get X ready to run locally", then "run locally"): use `pnx dev setup` and `pnx dev run`, from the folder where the user keeps their repositories (not inside a component's repository). **Single component:** run the commands below in that component's own repository folder (they read its `package.json`).
+**A whole System** ("install speakupnex locally", "set up forcenex", "get X ready to run locally", then "run locally"): use `pnx dev setup` and `pnx dev run`, from the folder where the user keeps their repositories (not inside a component's repository). **One component by name** ("install forcenex-backend locally", "get the speakupnex frontend running"): if the user names a System as well, `pnx dev setup <system> --env dit1 --only <component>` (clone, install, `.env`), then `pnx dev run <system> --only <component>`. With only a component name, `pnx dev up <component> --env dit1 --connect` does clone, install and run in one go, from the folder where they keep repositories; for setup without running, ask which System it belongs to. A name that matches several components: ask which. **Single component already cloned:** run the commands below in that component's own repository folder (they read its `package.json`).
 
 | The user wants | Command |
 |---|---|
