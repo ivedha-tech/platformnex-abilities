@@ -9,7 +9,7 @@ description: Set up, install or run a PlatformNEX System or one of its component
 
 ## Choose the command
 
-**A whole System** ("install speakupnex locally", "set up forcenex", "get X ready to run locally", then "run locally"): use `pnx dev setup` and `pnx dev run`, from the folder where the user keeps their repositories (not inside a component's repository). **One component by name** ("install forcenex-backend locally", "get the speakupnex frontend running"): the name works on its own, no System needed: `pnx dev setup <component> --env dit1` (clone, install, `.env`) then `pnx dev run <component>`. `pnx dev up <component> --env dit1 --connect` is the one-step alternative that also runs it. Use the exact catalog name; a name that matches no System or component, or several, ask the user which. (A System's name and a component's can be the same: say `component:default/<name>` for the component.) **Single component already cloned:** run the commands below in that component's own repository folder (they read its `package.json`).
+**A whole System** ("install speakupnex locally", "set up forcenex", "get X ready to run locally", then "run locally"): use `pnx dev setup` and `pnx dev run`, from the folder where the user keeps their repositories (not inside a component's repository). **One component by name:** `pnx dev setup <component> --env dit1` works on its own (see the section below); `pnx dev up <component> --env dit1 --connect` is the one-step clone, install and run. **Single component already cloned:** run the commands below in that component's own repository folder (they read its `package.json`).
 
 | The user wants | Command |
 |---|---|
@@ -28,13 +28,23 @@ description: Set up, install or run a PlatformNEX System or one of its component
 
 `<component>` is the PlatformNEX component name (for example `forcenex-backend`), `<env>` usually `dit1`.
 
-## Setting up and running a System
+## Setting up and running a System or component
 
-When the user says "set up `<system>`'s components" (or similar): run `pnx dev setup <system> --env dit1` (use another `<env>` only if they name one). It creates `./<system>/`, clones every component's repository into it, installs dependencies, and writes each component's `.env` (with secrets, 0600, git-ignored). Tell them it clones with their own GitHub credentials. When it finishes, report which components are ready and read out any it flagged (no repository in the catalog, clone or install failed, secrets it couldn't read). Don't try to fix a flagged component by hand-cloning it unless they ask; a missing repository is fixed in PlatformNEX. Components of a monorepo share one clone and each sits in its own folder inside it; a component flagged as sharing a folder needs its folder (`spec.sourcePath`) set in PlatformNEX.
+**"install / set up / run `<name>` locally"** (a System such as speakupnex or scalenex, or one component) is this skill's job. Use `pnx`; do **not** go looking through GitHub or the machine for some other installer or repository that happens to match the name (a `*-claude-agents` repo, an `install-local.sh`, an app repo). If `pnx` says it knows no System or component of that name, ask the user what they meant; never guess a neighbour.
 
-When they say "run locally" (or "start it"): run `pnx dev run <system>` **in the background** from the same folder as setup, then tell them which components started and on which ports (it prints them, labelled `[component]`). Output of every component is mixed in one stream; read it to answer questions about a specific one. Ctrl-C (or stopping the background task) ends all sessions. **Limit: at most 3 components at once** (the environment's per-person limit, 3 at most). If the System has more, don't start them all: ask which ones the user is working on (default: the ones they named, else the first three) and run `pnx dev run <system> --only a,b,c`. If `pnx dev run` still reports components it didn't start, tell the user which, and that they can run those with `--only` after stopping one, or an admin can raise “Per person”. Each component is its own session on the environment, so `You already have a session` or a per-person limit message for the second component means the environment's per-person limit is lower than the number of components: tell them an admin can raise it in Administration › Environments, or use `--only` to run fewer.
+**Never assume which components. Ask first, every time:**
+1. Run `pnx dev setup <name> --env dit1 --list` (read-only, clones nothing). It prints the components with their repository and folder, and names any with no repository.
+2. Show the user that list and ask which components they want: all, or named ones. A single component they named exactly needs no question, but still say what you're about to do.
+3. Run `pnx dev setup <name> --env dit1 --only a,b` (omit `--only` only when they said all). It makes `./<name>/`, clones each repository (a monorepo once), installs dependencies, and writes each component's `.env` (settings and secrets, 0600, git-ignored). It clones with the user's own GitHub credentials. Run it from the folder where they keep their repositories, not inside a component's repository.
+4. Report which components are ready, and read out anything it flagged: no repository in the catalog (fixed in PlatformNEX, don't hand-clone), a missing tool (`go`, `mvn`, `poetry`… say which and that setup can be run again), a clone or install failure, a monorepo folder clash (set `spec.sourcePath` in PlatformNEX).
 
-Components talk to the environment's services through tunnels (as with Connect), not to each other on localhost. To see a local frontend work against a local backend, use intercept on both (`--intercept`) or point the frontend at the backend's local port in its `.env`.
+**It is not only for Node.** Setup recognises Node, Python, Go, Rust, Java (Maven, Gradle), Ruby, PHP, .NET and compose projects and installs each the usual way. For a project it doesn't recognise it says so and installs nothing: look at the repository's README, tell the user what you'd run, and run it only once they agree.
+
+**Running:** before `pnx dev run`, confirm which components to start (again, not assumed). Then `pnx dev run <name> --env dit1 --only a,b` **in the background** from the same folder, and tell the user which started and on which ports (labelled `[component]` in its output). If pnx says it can't tell how to start a component (no dev script, unfamiliar stack), find the start command from the repository's README or files, tell the user, and with their OK run `pnx dev run <component> -- <command>` for that one. Ctrl-C (or stopping the background task) ends all sessions.
+
+**Limit: at most 3 components at once** (the per-person session limit, 3 at most). With more, ask which three, or which to run first. If `pnx dev run` still reports components it didn't start, say which, and that they can run those with `--only` after stopping one, or an admin can raise “Per person” in Administration › Environments.
+
+Components reach the environment's services through tunnels (as with Connect), not each other on localhost. For a local frontend against a local backend, use `--intercept` on both, or point the frontend at the backend's local port in its `.env`.
 
 ## Intercept
 
