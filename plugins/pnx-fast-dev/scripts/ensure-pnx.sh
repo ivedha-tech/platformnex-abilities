@@ -15,15 +15,17 @@ LOG="$DIR/install.log"
 command -v npm >/dev/null 2>&1 || exit 0
 mkdir -p "$DIR" 2>/dev/null || exit 0
 
-# Once a day.
-if [ -f "$STAMP" ] && [ -n "$(find "$STAMP" -mtime -1 2>/dev/null)" ]; then exit 0; fi
-touch "$STAMP"
+# Once a day (PNX_ENSURE_FORCE=1 skips the wait).
+if [ -z "${PNX_ENSURE_FORCE:-}" ] && [ -f "$STAMP" ] && [ -n "$(find "$STAMP" -mtime -1 2>/dev/null)" ]; then exit 0; fi
 
+# Node first, and no stamp when it fails: the stamp is for a check that ran, so once Node is upgraded the very next
+# session installs pnx (stamping first made it wait a day, with the message promising "next session").
 node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
 if [ "${node_major:-0}" -lt 20 ]; then
-  echo "pnx needs Node 20 or later (found $(node -v 2>/dev/null)); upgrade Node, then pnx installs itself next session."
+  echo "pnx needs Node 20 or later (found $(node -v 2>/dev/null || echo none)); upgrade Node (nvm install 22 && nvm alias default 22), then pnx installs itself next session."
   exit 0
 fi
+touch "$STAMP"
 
 installed="$(node -p "require('$(npm root -g)/@platformnex/pnx/package.json').version" 2>/dev/null || true)"
 
