@@ -92,6 +92,42 @@
       "source": "./plugins/pnx-fast-dev",
       "description": "PlatformNEX fast development: keeps the pnx CLI installed and current (SessionStart, once a day, in the background) and teaches Claude to use pnx dev intercept, connect and env against a non-production environment, preview pull requests (pnx dev preview) reach its databases (pnx dev db), and set up and run all of a System's components (pnx dev setup, pnx dev run).",
       "version": "1.2.4"
+    },
+    {
+      "name": "harness-core",
+      "source": "./plugins/harness-core",
+      "description": "Harness core: the skill router, shared checklists (definition of done, security, testing, performance, accessibility, observability), reviewer/security/test/performance agents and lifecycle commands (spec, plan, build, test, review, ship).",
+      "version": "1.0.0"
+    },
+    {
+      "name": "harness-define",
+      "source": "./plugins/harness-define",
+      "description": "Define phase: interview-me, idea-refine, spec-driven development, constraint-driven development and planning/task breakdown.",
+      "version": "1.0.0"
+    },
+    {
+      "name": "harness-build",
+      "source": "./plugins/harness-build",
+      "description": "Build phase: incremental implementation, context engineering, source-driven and doubt-driven development, frontend and API design, git workflow, code simplification.",
+      "version": "1.0.0"
+    },
+    {
+      "name": "harness-verify",
+      "source": "./plugins/harness-verify",
+      "description": "Verify phase: test-driven development, browser testing, debugging, code review, security hardening and performance optimization.",
+      "version": "1.0.0"
+    },
+    {
+      "name": "harness-ship",
+      "source": "./plugins/harness-ship",
+      "description": "Ship phase: CI/CD automation, shipping and launch, deprecation and migration, documentation and ADRs.",
+      "version": "1.0.0"
+    },
+    {
+      "name": "harness-operate",
+      "source": "./plugins/harness-operate",
+      "description": "Operate phase: observability, incident response and postmortems, SLOs/alerts/runbooks, cost review and release verification with canary.",
+      "version": "1.0.0"
     }
   ]
 }
