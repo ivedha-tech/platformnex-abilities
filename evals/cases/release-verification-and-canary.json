@@ -1,0 +1,34 @@
+{
+  "skill_name": "release-verification-and-canary",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "What should we check after deploying this release?",
+        "top_k": 3
+      },
+      {
+        "prompt": "Design a canary rollout with automatic rollback criteria",
+        "top_k": 3
+      },
+      {
+        "prompt": "How long should this release bake before full rollout?",
+        "top_k": 3
+      },
+      {
+        "prompt": "Verify the deploy worked and record the evidence",
+        "top_k": 3
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Write the CI pipeline for this repo",
+        "owner": "ci-cd-and-automation"
+      },
+      {
+        "prompt": "Run the pre-launch checklist",
+        "owner": "shipping-and-launch"
+      }
+    ]
+  },
+  "evals": []
+}

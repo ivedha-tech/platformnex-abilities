@@ -1,0 +1,109 @@
+#!/usr/bin/env node
+// Structural validation for the abilities marketplace. No dependencies, no network, free to run in CI.
+// Usage: node scripts/validate-abilities.mjs [--bundle <name>]...   (default: every bundle named harness-*)
+import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+
+const root = resolve(new URL('..', import.meta.url).pathname);
+const args = process.argv.slice(2);
+const only = [];
+for (let i = 0; i < args.length; i++) if (args[i] === '--bundle') only.push(args[++i]);
+
+const KEBAB = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+const ALLOWED_KEYS = new Set(['name', 'description', 'license', 'compatibility', 'metadata', 'allowed-tools']);
+// Terms the tool-neutral harness bundles must not contain (pnx integration is a later phase).
+const BANNED = /platformnex|\bpnx\b|gemini|codex|cursor|windsurf|copilot|opencode|antigravity/i;
+const REQUIRED_SECTIONS = [/^#+\s*overview/im, /^#+\s*when to use/im, /^#+\s*verification/im];
+const MAX_LINES = 500;
+
+const errors = [];
+const warnings = [];
+const err = (m) => errors.push(m);
+const warn = (m) => warnings.push(m);
+
+function frontmatter(text) {
+  const m = text.match(/^---\n([\s\S]*?)\n---\n/);
+  if (!m) return null;
+  const out = {};
+  let key = null;
+  for (const line of m[1].split('\n')) {
+    const kv = line.match(/^([A-Za-z-]+):\s*(.*)$/);
+    if (kv) { key = kv[1]; out[key] = kv[2].replace(/^["']|["']$/g, ''); }
+    else if (key && /^\s+/.test(line)) out[key] += ' ' + line.trim();
+  }
+  return out;
+}
+
+const pluginsDir = join(root, 'plugins');
+const bundles = readdirSync(pluginsDir)
+  .filter((d) => statSync(join(pluginsDir, d)).isDirectory())
+  .filter((d) => (only.length ? only.includes(d) : d.startsWith('harness-')));
+
+const marketplace = JSON.parse(readFileSync(join(root, '.claude-plugin/marketplace.json'), 'utf8'));
+const listed = new Map(marketplace.plugins.map((p) => [p.name, p]));
+
+// Every skill name in the harness, for cross-reference checks.
+const known = new Set();
+for (const b of bundles) {
+  const sd = join(pluginsDir, b, 'skills');
+  if (existsSync(sd)) for (const s of readdirSync(sd)) known.add(`${b}:${s}`);
+}
+
+for (const b of bundles) {
+  const dir = join(pluginsDir, b);
+  const pj = join(dir, '.claude-plugin/plugin.json');
+  if (!existsSync(pj)) err(`${b}: missing .claude-plugin/plugin.json`);
+  else {
+    try {
+      const j = JSON.parse(readFileSync(pj, 'utf8'));
+      if (j.name !== b) err(`${b}: plugin.json name "${j.name}" does not match directory`);
+      if (!j.description || !j.version) err(`${b}: plugin.json needs description and version`);
+      const entry = listed.get(b);
+      if (!entry) err(`${b}: not listed in .claude-plugin/marketplace.json`);
+      else if (entry.version !== j.version) err(`${b}: marketplace version ${entry.version} != plugin.json ${j.version}`);
+    } catch (e) { err(`${b}: plugin.json is not valid JSON (${e.message})`); }
+  }
+  for (const f of ['LICENSE', 'NOTICE.md']) if (!existsSync(join(dir, f))) err(`${b}: missing ${f}`);
+  if (existsSync(join(dir, 'hooks'))) err(`${b}: hooks are held back for v1; remove the hooks directory`);
+
+  const sd = join(dir, 'skills');
+  if (existsSync(sd)) for (const s of readdirSync(sd)) {
+    const sk = join(sd, s, 'SKILL.md');
+    const id = `${b}/${s}`;
+    if (!KEBAB.test(s)) err(`${id}: directory name must be lowercase-hyphen`);
+    if (!existsSync(sk)) { err(`${id}: missing SKILL.md`); continue; }
+    const text = readFileSync(sk, 'utf8');
+    const fm = frontmatter(text);
+    if (!fm) { err(`${id}: missing YAML frontmatter`); continue; }
+    if (fm.name !== s) err(`${id}: frontmatter name "${fm.name}" must equal directory name`);
+    if (!fm.description) err(`${id}: missing description`);
+    else {
+      if (fm.description.length > 1024) err(`${id}: description is ${fm.description.length} chars (max 1024)`);
+      if (!/use (when|before|after|during|for)\b/i.test(fm.description)) err(`${id}: description needs a "Use when ..." trigger`);
+    }
+    for (const k of Object.keys(fm)) if (!ALLOWED_KEYS.has(k)) err(`${id}: unsupported frontmatter key "${k}"`);
+    // The router is a lookup, not a process skill, so it has no When to Use / Verification sections.
+    if (s !== 'using-agent-skills') for (const re of REQUIRED_SECTIONS) if (!re.test(text)) err(`${id}: missing section matching ${re}`);
+    if (text.split('\n').length > MAX_LINES) warn(`${id}: over ${MAX_LINES} lines`);
+    for (const m of text.matchAll(/\b(harness-[a-z]+):([a-z0-9-]+)/g)) {
+      if (!known.has(`${m[1]}:${m[2]}`) && bundles.includes(m[1])) err(`${id}: references unknown skill ${m[0]}`);
+      else if (!bundles.includes(m[1]) && !only.length) err(`${id}: references unknown bundle ${m[1]}`);
+    }
+  }
+
+  // Banned terms across everything except the notice/licence.
+  const walk = (d) => readdirSync(d).flatMap((n) => {
+    const p = join(d, n);
+    return statSync(p).isDirectory() ? walk(p) : [p];
+  });
+  for (const f of walk(dir)) {
+    if (/LICENSE$|NOTICE\.md$/.test(f) || !/\.(md|json|sh|mjs|js)$/.test(f)) continue;
+    const hit = readFileSync(f, 'utf8').match(BANNED);
+    if (hit) err(`${f.replace(root + '/', '')}: contains banned term "${hit[0]}"`);
+  }
+}
+
+for (const w of warnings) console.warn(`warn  ${w}`);
+for (const e of errors) console.error(`error ${e}`);
+console.log(`${bundles.length} bundle(s), ${[...known].length} skill(s), ${errors.length} error(s), ${warnings.length} warning(s)`);
+process.exit(errors.length ? 1 : 0);

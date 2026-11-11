@@ -1,0 +1,34 @@
+{
+  "skill_name": "slo-alerts-and-runbooks",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "Define SLOs and an error budget for our API",
+        "top_k": 3
+      },
+      {
+        "prompt": "Our on-call is drowning in noisy alerts, fix the alerting",
+        "top_k": 3
+      },
+      {
+        "prompt": "Write a runbook for the queue backlog alert",
+        "top_k": 3
+      },
+      {
+        "prompt": "Which SLIs should we track for a checkout flow?",
+        "top_k": 3
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Add log statements to this function",
+        "owner": "observability-and-instrumentation"
+      },
+      {
+        "prompt": "Run the load test and find the slow query",
+        "owner": "performance-optimization"
+      }
+    ]
+  },
+  "evals": []
+}
