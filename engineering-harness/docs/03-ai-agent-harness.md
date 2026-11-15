@@ -34,6 +34,10 @@ service's `CLAUDE.md` says which skill to start with. Slash commands are for
 forcing a step. The first two are advisory because the model chooses; the PRD
 rule is the one design gate that fails a build, through `scripts/check-gates.sh`.
 
+## What you see when Claude Code opens
+
+`pnx-harness` prints a short notice each time Claude Code opens or resumes. One line means your setup looks complete. A list means something is left: `pnx` missing, too old or signed out, a production `kubectl` context, or an `ivedha-tech` repository without the harness files. Each bullet says what to do, and the guide is `06-developer-setup.md`. The notice runs from the plugin, so no notice means the plugin's hooks are not loaded for you and the guard hooks are off too.
+
 ## What the guard hooks block
 
 | Hook | Blocks |

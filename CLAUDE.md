@@ -8,6 +8,7 @@ The organisation's Claude Code plugin marketplace, plus the engineering kit in `
 |---|---|
 | Validate the harness bundles | `node scripts/validate-abilities.mjs` |
 | Guard-hook self-test | `bash plugins/pnx-harness/scripts/test-hooks.sh` |
+| Start-up notice test | `bash plugins/pnx-harness/scripts/test-session-info.sh` |
 | PRD gate test | `bash engineering-harness/scripts/test-check-gates.sh` |
 | Validate one bundle | `node scripts/validate-abilities.mjs --bundle harness-ship` |
 
