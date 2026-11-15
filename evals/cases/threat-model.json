@@ -1,0 +1,52 @@
+{
+  "skill_name": "threat-model",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "Threat model the new export endpoint before we build it",
+        "top_k": 3
+      },
+      {
+        "prompt": "Run a STRIDE pass on this design",
+        "top_k": 3
+      },
+      {
+        "prompt": "This feature handles Confidential customer data and calls an LLM. What can go wrong?",
+        "top_k": 3
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Audit this code for SQL injection",
+        "owner": "security-and-hardening"
+      },
+      {
+        "prompt": "Review this diff before merge",
+        "owner": "code-review-and-quality"
+      },
+      {
+        "prompt": "Write the ADR for the export decision",
+        "owner": "adr"
+      }
+    ]
+  },
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Create the threat model for this design and the route code.",
+      "expected_output": "docs/threat-model.md with named threats per trust boundary, LLM-specific threats, and a privacy assessment draft",
+      "files": [
+        "threat-model"
+      ],
+      "expectations": [
+        "Names the missing tenant check in start_export as a concrete threat, not a category",
+        "Notes that the signed link in get_export has no check that the caller belongs to the tenant",
+        "Adds prompt injection and data exfiltration because a model reads user-typed notes",
+        "Rates likelihood and impact and gives a mitigation or offers a security-labelled issue for each",
+        "Drafts a privacy impact assessment because personal data is processed",
+        "Lists what it could not assess from the repository",
+        "Does not mark the review as signed off"
+      ]
+    }
+  ]
+}

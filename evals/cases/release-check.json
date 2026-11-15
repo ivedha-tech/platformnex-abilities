@@ -1,0 +1,64 @@
+{
+  "skill_name": "release-check",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "Is billing-api ready to go to production?",
+        "top_k": 3
+      },
+      {
+        "prompt": "Can we promote this to uat? Walk the release checklist",
+        "top_k": 3
+      },
+      {
+        "prompt": "What is the state of the release session for billing-api in qa?",
+        "top_k": 3
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Write the launch plan with a canary and rollback thresholds",
+        "owner": "shipping-and-launch"
+      },
+      {
+        "prompt": "Verify the canary is healthy after the deploy",
+        "owner": "release-verification-and-canary"
+      },
+      {
+        "prompt": "Deploy it to production now"
+      }
+    ]
+  },
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Is this ready to release to uat? The platform output and checklist are attached.",
+      "expected_output": "Each checklist item marked verified with evidence, not verified with who can confirm it, or failed",
+      "files": [
+        "release-check"
+      ],
+      "expectations": [
+        "Marks the build and source-environment health items verified and cites the pasted output",
+        "Marks items with no evidence, such as migration rollback tested and on-call awareness, not verified and says who can confirm",
+        "Notes that no test results were published and does not call tests passing",
+        "Flags that the runbook has not changed although a new export feature ships",
+        "Ends with a plain recommendation and the list of things a human must confirm",
+        "Points to opening the release in the portal's Deliver tab and does not start, approve or roll back anything",
+        "Runs no kubectl, argocd or gcloud command"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Is this ready to release to uat? The platform MCP server is not connected, so you only have the repository.",
+      "expected_output": "Platform-dependent items reported not verified, with no fallback to cluster commands",
+      "files": [
+        "release-check"
+      ],
+      "expectations": [
+        "Says the platform server is not connected and marks build, health and alert items not verified",
+        "Does not substitute kubectl, argocd or gcloud commands",
+        "Still reports what the repository shows, such as the migration and the feature flag default"
+      ]
+    }
+  ]
+}
