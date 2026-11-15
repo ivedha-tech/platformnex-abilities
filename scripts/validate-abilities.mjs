@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Structural validation for the abilities marketplace. No dependencies, no network, free to run in CI.
-// Usage: node scripts/validate-abilities.mjs [--bundle <name>]...   (default: every bundle named harness-*)
+// Usage: node scripts/validate-abilities.mjs [--bundle <name>]...   (default: every bundle named harness-*, plus PLATFORM_BUNDLES)
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
@@ -13,6 +13,9 @@ const KEBAB = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const ALLOWED_KEYS = new Set(['name', 'description', 'license', 'compatibility', 'metadata', 'allowed-tools']);
 // Terms the tool-neutral harness bundles must not contain (pnx integration is a later phase).
 const BANNED = /platformnex|\bpnx\b|gemini|codex|cursor|windsurf|copilot|opencode|antigravity/i;
+// Bundles that are PlatformNEX-specific by design: same structural rules, but they may name the
+// platform, ship hooks, and carry no upstream licence notice.
+const PLATFORM_BUNDLES = new Set(['pnx-harness']);
 const REQUIRED_SECTIONS = [/^#+\s*overview/im, /^#+\s*when to use/im, /^#+\s*verification/im];
 const MAX_LINES = 500;
 
@@ -37,7 +40,7 @@ function frontmatter(text) {
 const pluginsDir = join(root, 'plugins');
 const bundles = readdirSync(pluginsDir)
   .filter((d) => statSync(join(pluginsDir, d)).isDirectory())
-  .filter((d) => (only.length ? only.includes(d) : d.startsWith('harness-')));
+  .filter((d) => (only.length ? only.includes(d) : d.startsWith('harness-') || PLATFORM_BUNDLES.has(d)));
 
 const marketplace = JSON.parse(readFileSync(join(root, '.claude-plugin/marketplace.json'), 'utf8'));
 const listed = new Map(marketplace.plugins.map((p) => [p.name, p]));
@@ -63,8 +66,24 @@ for (const b of bundles) {
       else if (entry.version !== j.version) err(`${b}: marketplace version ${entry.version} != plugin.json ${j.version}`);
     } catch (e) { err(`${b}: plugin.json is not valid JSON (${e.message})`); }
   }
-  for (const f of ['LICENSE', 'NOTICE.md']) if (!existsSync(join(dir, f))) err(`${b}: missing ${f}`);
-  if (existsSync(join(dir, 'hooks'))) err(`${b}: hooks are held back for v1; remove the hooks directory`);
+  const platform = PLATFORM_BUNDLES.has(b);
+  if (!platform) {
+    for (const f of ['LICENSE', 'NOTICE.md']) if (!existsSync(join(dir, f))) err(`${b}: missing ${f}`);
+    if (existsSync(join(dir, 'hooks'))) err(`${b}: hooks are held back for v1; remove the hooks directory`);
+  } else if (existsSync(join(dir, 'hooks'))) {
+    // Every hook command must point at a script that exists inside the bundle.
+    const hj = join(dir, 'hooks/hooks.json');
+    if (!existsSync(hj)) err(`${b}: hooks directory without hooks.json`);
+    else {
+      try {
+        const text = readFileSync(hj, 'utf8');
+        JSON.parse(text);
+        for (const m of text.matchAll(/\$\{CLAUDE_PLUGIN_ROOT\}\/([A-Za-z0-9_./-]+)/g)) {
+          if (!existsSync(join(dir, m[1]))) err(`${b}: hooks.json references missing file ${m[1]}`);
+        }
+      } catch (e) { err(`${b}: hooks.json is not valid JSON (${e.message})`); }
+    }
+  }
 
   const sd = join(dir, 'skills');
   if (existsSync(sd)) for (const s of readdirSync(sd)) {
@@ -91,6 +110,7 @@ for (const b of bundles) {
     }
   }
 
+  if (platform) continue;
   // Banned terms across everything except the notice/licence.
   const walk = (d) => readdirSync(d).flatMap((n) => {
     const p = join(d, n);
