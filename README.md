@@ -34,7 +34,7 @@ Restart the session after installing. Skills from a plugin appear namespaced, fo
 |---|---|
 | `harness-core` | The skill router, shared checklists, review agents and the lifecycle commands `/spec`, `/plan`, `/constraints`, `/build`, `/test`, `/review`, `/code-simplify`, `/ship`, `/webperf` |
 | `harness-define`, `harness-build`, `harness-verify`, `harness-ship`, `harness-operate` | Skills for each phase, from interviewing and specs to incidents and cost review |
-| `pnx-harness` | The PlatformNEX layer: guard hooks, the gate skills (`idea-brief`, `prd`, `adr`, `threat-model`, `pr`, `release-check`), `platform-signals`, and a compliance reviewer |
+| `pnx-harness` | The PlatformNEX layer: guard hooks, a start-up notice listing what a developer still has to set up ([guide](engineering-harness/docs/06-developer-setup.md)), the gate skills (`idea-brief`, `prd`, `adr`, `threat-model`, `pr`, `release-check`), `platform-signals`, and a compliance reviewer |
 
 The `harness-*` bundles are tool-neutral by design. Anything that names PlatformNEX lives in `pnx-harness` or `pnx-fast-dev`.
 
@@ -72,6 +72,7 @@ Removing a plugin from the manifest removes it for everyone (`forceRemoveDeleted
 ```bash
 node scripts/validate-abilities.mjs              # structure, frontmatter, references, banned terms (free)
 bash plugins/pnx-harness/scripts/test-hooks.sh   # guard-hook allow and block cases (free)
+bash plugins/pnx-harness/scripts/test-session-info.sh   # the start-up notice (free)
 bash engineering-harness/scripts/test-check-gates.sh   # the PRD gate used by the service template (free)
 ```
 

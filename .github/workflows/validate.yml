@@ -17,5 +17,7 @@ jobs:
       - run: node scripts/validate-abilities.mjs
       # Guard-hook self-test: every allow/block rule in pnx-harness, no network.
       - run: bash plugins/pnx-harness/scripts/test-hooks.sh
+      # The start-up notice: fake pnx and kubectl, throwaway repos, no network.
+      - run: bash plugins/pnx-harness/scripts/test-session-info.sh
       # PRD gate used by the service template: throwaway git repos, no network.
       - run: bash engineering-harness/scripts/test-check-gates.sh
