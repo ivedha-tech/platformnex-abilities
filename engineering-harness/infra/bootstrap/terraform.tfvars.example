@@ -1,0 +1,13 @@
+org_id                  = "000000000000"
+billing_account         = "AAAAAA-BBBBBB-CCCCCC"
+seed_project_id         = "acme-core-seed"
+prefix                  = "acme"
+product                 = "core"
+region                  = "northamerica-northeast2"
+workspace_customer_id   = "C0xxxxxxx"
+group_platform_admins   = "gcp-platform-admins@example.com"
+group_developers        = "gcp-developers@example.com"
+group_security          = "gcp-security@example.com"
+
+# Flip this once the retention period is agreed. It cannot be undone.
+lock_audit_bucket            = false

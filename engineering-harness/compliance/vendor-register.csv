@@ -1,0 +1,5 @@
+vendor,purpose,data_classes,processing_region,tier,attestations,dpa_signed,trains_on_inputs,approved_by,approved_on,next_review
+Google Cloud,Hosting and CI/CD,Up to Restricted,Per product region,Critical,SOC 2; ISO 27001,,No,,,
+GitHub,Source control and review,Internal,US (check data residency option),Critical,SOC 2; ISO 27001,,Per plan settings,,,
+Google Workspace,Identity; mail; docs,Up to Confidential,Per Workspace data region setting,Critical,SOC 2; ISO 27001,,No,,,
+Anthropic (Claude),AI coding assistant,Internal only,Check current terms,Standard,Check current reports,,Check plan settings,,,

@@ -1,0 +1,20 @@
+stage:idea	c5def5	G0 idea awaiting triage
+stage:define	bfd4f2	G1 PRD in progress
+stage:design	d4c5f9	G2 ADR / threat model in progress
+stage:build	fef2c0	G3-G4 in development or review
+stage:release	c2e0c6	G5 releasing
+type:feature	0e8a16	New capability
+type:bug	d73a4a	Something is broken
+type:chore	cfd3d7	Maintenance, dependencies, tooling
+security	b60205	Security relevant
+harness	5319e7	Friction or defect in the harness itself
+access-request	1d76db	Evidence: access granted or changed
+access-review	1d76db	Evidence: quarterly access review
+incident	b60205	Evidence: incident record
+emergency-change	e99695	Evidence: emergency change retrospective
+policy-exception	fbca04	Evidence: approved exception with expiry
+restore-test	1d76db	Evidence: backup restore test
+privacy-request	1d76db	Evidence: data subject request
+ops-review	1d76db	Evidence: monthly operations review
+risk	fbca04	Risk register input or review
+compliance	1d76db	Evidence: other compliance task
