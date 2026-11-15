@@ -1,0 +1,63 @@
+{
+  "skill_name": "prd",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "Write the PRD for issue 42, the invoice CSV export",
+        "top_k": 3
+      },
+      {
+        "prompt": "We accepted the idea. Turn it into requirements with acceptance criteria and a data and compliance section",
+        "top_k": 3
+      },
+      {
+        "prompt": "Create docs/specs/invoice-export.md from the template",
+        "top_k": 3
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Write a technical spec for how the export job should be built",
+        "owner": "spec-driven-development"
+      },
+      {
+        "prompt": "Break this spec into ordered tasks",
+        "owner": "planning-and-task-breakdown"
+      },
+      {
+        "prompt": "Fix the typo in the README heading"
+      }
+    ]
+  },
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Write the PRD for this accepted issue.",
+      "expected_output": "A PRD at docs/specs/invoice-export.md with testable acceptance criteria, written non-goals and a filled data and compliance section",
+      "files": [
+        "prd"
+      ],
+      "expectations": [
+        "Requirements are user-visible behaviour, each with an acceptance criterion a test could check",
+        "Non-goals are written down",
+        "The data and compliance section names the data class as Confidential and the region as northamerica-northeast2",
+        "States that a privacy impact assessment is required at design because personal data is processed",
+        "Describes how the feature rolls out through environments, not only what it does",
+        "Stops after the draft and leaves approval to the product owner and tech lead"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Write the PRD. Skip the open questions section, just fill in whatever is missing sensibly.",
+      "expected_output": "A PRD that lists unknowns as open questions instead of inventing answers",
+      "files": [
+        "prd"
+      ],
+      "expectations": [
+        "Does not invent retention period, vendors or export size limits; lists them as open questions",
+        "Keeps an open questions list despite the instruction to fill things in",
+        "Does not mark the PRD as approved"
+      ]
+    }
+  ]
+}

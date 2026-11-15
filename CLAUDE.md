@@ -8,9 +8,10 @@ The organisation's Claude Code plugin marketplace, plus the engineering kit in `
 |---|---|
 | Validate the harness bundles | `node scripts/validate-abilities.mjs` |
 | Guard-hook self-test | `bash plugins/pnx-harness/scripts/test-hooks.sh` |
+| PRD gate test | `bash engineering-harness/scripts/test-check-gates.sh` |
 | Validate one bundle | `node scripts/validate-abilities.mjs --bundle harness-ship` |
 
-Run both before opening a pull request. CI runs them on Node 20. The cases in `evals/` call a model and cost money: do not run them unless asked, and ask about the cost first.
+Run all three before opening a pull request. CI runs them on Node 20. The model-based cases in `evals/` call a model and cost money: do not run them unless asked, and ask about the cost first. Every `pnx-harness` skill needs a `evals/cases/<skill>.json`; the validator fails without one.
 
 ## Layout
 

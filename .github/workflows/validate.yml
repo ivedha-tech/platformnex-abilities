@@ -17,3 +17,5 @@ jobs:
       - run: node scripts/validate-abilities.mjs
       # Guard-hook self-test: every allow/block rule in pnx-harness, no network.
       - run: bash plugins/pnx-harness/scripts/test-hooks.sh
+      # PRD gate used by the service template: throwaway git repos, no network.
+      - run: bash engineering-harness/scripts/test-check-gates.sh

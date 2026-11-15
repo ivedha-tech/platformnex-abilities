@@ -1,0 +1,8 @@
+$ make check
+ruff format --check .  ... ok
+ruff check .           ... ok
+pytest
+..................F.
+FAILED tests/test_export.py::test_export_includes_header_row - assert rows[0] == "invoice,total" ; got "number,total"
+1 failed, 19 passed
+make: *** [test] Error 1

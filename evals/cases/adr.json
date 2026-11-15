@@ -1,0 +1,51 @@
+{
+  "skill_name": "adr",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "We need to choose between streaming and a background job for the export. Record the decision.",
+        "top_k": 3
+      },
+      {
+        "prompt": "Write an ADR for adding Redis as a cache",
+        "top_k": 3
+      },
+      {
+        "prompt": "Document why we picked Postgres over Firestore as an architecture decision record",
+        "top_k": 3
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Write the changelog entry for this release",
+        "owner": "git-workflow-and-versioning"
+      },
+      {
+        "prompt": "Rename this variable to something clearer",
+        "owner": "code-simplification"
+      },
+      {
+        "prompt": "Write a runbook for the export job",
+        "owner": "slo-alerts-and-runbooks"
+      }
+    ]
+  },
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Write the ADR for the export decision. The repo's docs/adr folder is included.",
+      "expected_output": "docs/adr/0003-<slug>.md, status Proposed, with two real options and the security, privacy and residency section filled",
+      "files": [
+        "adr"
+      ],
+      "expectations": [
+        "Numbers the record 0003 after finding 0001 and 0002",
+        "Gives at least two real options, with honest costs for the one it favours",
+        "Fills the security, privacy and residency section and keeps data in northamerica-northeast2",
+        "If a bucket or queue is chosen, says it is requested through an infrastructure-as-code pull request and is not provisioned by the platform",
+        "Leaves the status as Proposed",
+        "Tells the user the threat model needs updating if a trust boundary changed"
+      ]
+    }
+  ]
+}

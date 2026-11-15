@@ -123,6 +123,48 @@ for (const b of bundles) {
   }
 }
 
+// Eval coverage for the platform bundles: every skill has trigger and behaviour cases with the fields a
+// runner reads, and every fire / stay-quiet check has a prompt and at least one grader. Structure only;
+// running the cases calls a model and is not done here.
+const allSkillNames = new Set();
+for (const d of readdirSync(pluginsDir)) {
+  const sd = join(pluginsDir, d, 'skills');
+  if (existsSync(sd) && statSync(sd).isDirectory()) for (const s of readdirSync(sd)) allSkillNames.add(s);
+}
+for (const b of bundles.filter((x) => PLATFORM_BUNDLES.has(x))) {
+  const sd = join(pluginsDir, b, 'skills');
+  if (!existsSync(sd)) continue;
+  for (const s of readdirSync(sd)) {
+    const id = `${b}/${s}`;
+    const cf = join(root, 'evals/cases', `${s}.json`);
+    if (!existsSync(cf)) { err(`${id}: no eval cases at evals/cases/${s}.json`); continue; }
+    let c;
+    try { c = JSON.parse(readFileSync(cf, 'utf8')); } catch (e) { err(`${id}: evals/cases/${s}.json is not valid JSON (${e.message})`); continue; }
+    if (c.skill_name !== s) err(`${id}: eval cases name "${c.skill_name}" does not match the skill`);
+    const pos = c.trigger?.positive ?? [];
+    const neg = c.trigger?.negative ?? [];
+    if (pos.length < 3) err(`${id}: needs at least 3 positive trigger prompts (has ${pos.length})`);
+    if (neg.length < 2) err(`${id}: needs at least 2 negative trigger prompts (has ${neg.length})`);
+    for (const p of [...pos, ...neg]) if (!p.prompt || typeof p.prompt !== 'string') err(`${id}: a trigger entry has no prompt`);
+    for (const n of neg) if (n.owner && !allSkillNames.has(n.owner)) err(`${id}: negative prompt names owner "${n.owner}", which is not a skill`);
+    if (!(c.evals?.length)) err(`${id}: needs at least one behavioural eval`);
+    for (const e of c.evals ?? []) {
+      if (!e.prompt || !e.expected_output || !(e.expectations?.length)) err(`${id}: eval ${e.id} needs prompt, expected_output and expectations`);
+      for (const f of e.files ?? []) if (!existsSync(join(root, 'evals/fixtures', f))) err(`${id}: eval ${e.id} names fixture "${f}", which does not exist`);
+    }
+  }
+}
+const checksDir = join(root, 'evals/plugin');
+if (existsSync(checksDir)) {
+  for (const d of readdirSync(checksDir)) {
+    const dir = join(checksDir, d);
+    if (!statSync(dir).isDirectory()) continue;
+    if (!existsSync(join(dir, 'prompt.md'))) err(`evals/plugin/${d}: missing prompt.md`);
+    const gd = join(dir, 'graders');
+    if (!existsSync(gd) || !readdirSync(gd).some((f) => f.endsWith('.md'))) err(`evals/plugin/${d}: needs at least one grader in graders/`);
+  }
+}
+
 for (const w of warnings) console.warn(`warn  ${w}`);
 for (const e of errors) console.error(`error ${e}`);
 console.log(`${bundles.length} bundle(s), ${[...known].length} skill(s), ${errors.length} error(s), ${warnings.length} warning(s)`);
