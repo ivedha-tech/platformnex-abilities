@@ -72,9 +72,10 @@ Removing a plugin from the manifest removes it for everyone (`forceRemoveDeleted
 ```bash
 node scripts/validate-abilities.mjs              # structure, frontmatter, references, banned terms (free)
 bash plugins/pnx-harness/scripts/test-hooks.sh   # guard-hook allow and block cases (free)
+bash engineering-harness/scripts/test-check-gates.sh   # the PRD gate used by the service template (free)
 ```
 
-The cases in `evals/` call a model and cost money. Run them on demand, after agreeing the cost, and cap the cases per run.
+The model-based cases in `evals/` call a model and cost money. Run them on demand, after agreeing the cost, and cap the cases per run. [`evals/README.md`](evals/README.md) explains both kinds and how to add a case.
 
 ## The engineering kit
 

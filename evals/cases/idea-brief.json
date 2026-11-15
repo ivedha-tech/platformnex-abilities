@@ -1,0 +1,62 @@
+{
+  "skill_name": "idea-brief",
+  "trigger": {
+    "positive": [
+      {
+        "prompt": "Support keeps getting asked for a way to get reports out of the product. Can you turn that into an idea?",
+        "top_k": 3
+      },
+      {
+        "prompt": "I have a rough idea: let admins export audit logs. Write it up as an idea brief for triage.",
+        "top_k": 3
+      },
+      {
+        "prompt": "Draft a G0 brief for this problem: customers cannot tell why their import failed.",
+        "top_k": 3
+      }
+    ],
+    "negative": [
+      {
+        "prompt": "Write the PRD for the invoice export",
+        "owner": "prd"
+      },
+      {
+        "prompt": "Format this file with prettier"
+      },
+      {
+        "prompt": "Stress-test the assumptions behind this product idea and widen the options before we commit",
+        "owner": "idea-refine"
+      }
+    ]
+  },
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Sales sent this ticket. Turn it into an idea brief.",
+      "expected_output": "A short list of questions before any drafting, then a half-page brief that does not design a solution",
+      "files": [
+        "idea-brief"
+      ],
+      "expectations": [
+        "Notices the ticket is a solution with no stated problem and asks who has the problem and what it costs them",
+        "Asks no more than three short questions before drafting",
+        "Does not guess evidence, size or data class; marks them as unknown or asks",
+        "The brief stays about half a page and proposes no design",
+        "Does not file an issue without the user confirming the command"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Here are my answers: finance leads ask for it weekly, it costs support two days per request, data is customer invoices. Finish the brief and file it.",
+      "expected_output": "A completed brief and an offer to file it with the stage:idea label, pending confirmation",
+      "files": [
+        "idea-brief"
+      ],
+      "expectations": [
+        "Fills every template section using the answers given",
+        "States the data class as Confidential or flags it for confirmation, not as Public",
+        "Offers gh issue create with the stage:idea label and waits for confirmation before running it"
+      ]
+    }
+  ]
+}
