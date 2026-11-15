@@ -76,7 +76,7 @@
       "name": "pnx-harness",
       "source": "./plugins/pnx-harness",
       "description": "PlatformNEX layer of the engineering harness: guard hooks that keep agents off the release path, secrets and guardrail files (PreToolUse on Bash and edits; formats Python after an edit), gate skills (idea brief, PRD, ADR, threat model, pull request, release readiness), a compliance reviewer, and a guide to reading release, alert and cost state through the platformnex MCP server.",
-      "version": "1.0.0"
+      "version": "1.0.1"
     },
     {
       "name": "harness-core",
