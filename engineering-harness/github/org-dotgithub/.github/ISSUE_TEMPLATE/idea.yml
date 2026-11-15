@@ -1,0 +1,32 @@
+name: Idea
+description: Propose a problem worth solving (gate G0)
+labels: ["stage:idea"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Who has it, how often, and what does it cost them today?
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Quotes, tickets, numbers.
+  - type: textarea
+    id: direction
+    attributes:
+      label: Proposed direction
+  - type: dropdown
+    id: data
+    attributes:
+      label: Highest data class touched
+      options: ["Public", "Internal", "Confidential", "Restricted", "Not sure"]
+    validations:
+      required: true
+  - type: dropdown
+    id: size
+    attributes:
+      label: Size guess
+      options: ["S", "M", "L"]

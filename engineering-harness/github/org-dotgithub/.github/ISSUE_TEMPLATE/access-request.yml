@@ -1,0 +1,29 @@
+name: Access request
+description: Request, change, or remove access (kept as audit evidence)
+labels: ["access-request"]
+body:
+  - type: input
+    id: who
+    attributes:
+      label: Who
+    validations:
+      required: true
+  - type: input
+    id: what
+    attributes:
+      label: Group / team / role requested
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Business reason
+    validations:
+      required: true
+  - type: input
+    id: until
+    attributes:
+      label: Needed until (leave blank if permanent for the role)
+  - type: markdown
+    attributes:
+      value: "The requester's manager approves in a comment. The platform owner comments when the change is made, then closes the issue."

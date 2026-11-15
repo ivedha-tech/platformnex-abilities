@@ -1,0 +1,31 @@
+name: Incident
+description: Declare a security or availability incident
+labels: ["incident"]
+body:
+  - type: dropdown
+    id: sev
+    attributes:
+      label: Severity
+      options: ["Sev 1", "Sev 2", "Sev 3", "Sev 4"]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What is known so far
+    validations:
+      required: true
+  - type: input
+    id: ic
+    attributes:
+      label: Incident commander
+  - type: dropdown
+    id: data
+    attributes:
+      label: Could personal or customer data be involved?
+      options: ["Unknown", "Yes", "No"]
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: "Keep sensitive details out of this issue; link to the restricted incident doc instead."

@@ -1,0 +1,13 @@
+# Last matching pattern wins. Teams must have write access to the repo.
+*                         @__GITHUB_ORG__/tech-leads
+
+# Guardrails and pipelines: loosening these needs security review
+/.claude/                 @__GITHUB_ORG__/tech-leads @__GITHUB_ORG__/security
+/CLAUDE.md                @__GITHUB_ORG__/tech-leads @__GITHUB_ORG__/security
+/.github/                 @__GITHUB_ORG__/platform-admins @__GITHUB_ORG__/security
+/cloudbuild.yaml          @__GITHUB_ORG__/platform-admins @__GITHUB_ORG__/security
+/cloudbuild-tests.yaml    @__GITHUB_ORG__/platform-admins @__GITHUB_ORG__/security
+/Dockerfile               @__GITHUB_ORG__/platform-admins
+/.pre-commit-config.yaml  @__GITHUB_ORG__/security
+/.gitleaks.toml           @__GITHUB_ORG__/security
+/docs/threat-model.md     @__GITHUB_ORG__/security

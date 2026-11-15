@@ -1,0 +1,6 @@
+# One file per feature. PlatformNEX TestOps maps test results to these criteria.
+feature: HEALTH
+title: Health endpoint
+criteria:
+  - id: HEALTH-1
+    text: GET /healthz answers 200 when the service is up

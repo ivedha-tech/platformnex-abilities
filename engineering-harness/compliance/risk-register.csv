@@ -1,0 +1,13 @@
+id,risk,category,likelihood_1_5,impact_1_5,score,treatment,controls,owner,status,next_review
+R01,Credential or secret committed to a repository,Security,3,4,12,Mitigate,C10; C11,,Open,
+R02,Unreviewed or malicious change reaches production,Security,2,5,10,Mitigate,C03; C13; C19; C20,,Open,
+R03,Customer data stored or processed outside the approved region,Compliance,2,5,10,Mitigate,C24; C32,,Open,
+R04,Confidential or Restricted data entered into an AI tool,Privacy,3,4,12,Mitigate,C33; C04,,Open,
+R05,AI agent takes a destructive or out-of-scope action,Security,3,3,9,Mitigate,C07; C33; C18,,Open,
+R06,Vulnerable or malicious dependency (including AI-suggested packages),Security,3,4,12,Mitigate,C17,,Open,
+R07,Departed staff retain access,Security,2,4,8,Mitigate,C08; C09,,Open,
+R08,Data loss with no working restore,Availability,2,5,10,Mitigate,C31,,Open,
+R09,Key-person dependency on the platform owner,Operational,3,3,9,Mitigate,BC policy rule 6,,Open,
+R10,Critical vendor outage or breach,Third party,2,4,8,Transfer / mitigate,C32,,Open,
+R11,Production data copied to lower environments or laptops,Privacy,2,5,10,Mitigate,C18; C07,,Open,
+R12,Controls exist but evidence is not retained for the audit period,Compliance,3,3,9,Mitigate,evidence-collection.md,,Open,

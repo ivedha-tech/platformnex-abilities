@@ -1,0 +1,10 @@
+# Extends the default ruleset. Add allowlist entries only for confirmed false
+# positives, with a comment explaining each; changes need security review.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known non-secrets"
+paths = [
+  '''\.env\.example$''',
+]
