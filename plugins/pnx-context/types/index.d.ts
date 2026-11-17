@@ -65,6 +65,8 @@ export type Ui = {
   chosenRoot?: string
   /** The repository the session's own tool calls touched last. */
   touchedRoot?: string
+  /** The component tab the person picked, by entity ref; empty means the first. */
+  activeEntity?: string
   /** A release draft waiting for the person's confirmation. */
   pending?: { entityRef: string; environmentId: number; environmentName: string; branch: string; head?: string }
   /** The result of the last action, one line plus an optional link. */

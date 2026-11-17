@@ -1,6 +1,6 @@
 {
   "name": "pnx-context",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "A sidebar pane showing which PlatformNEX component the repo you are in belongs to: health, open pull requests, open releases and small graphs. Read-only except one button that opens a draft release (never deploys). Opt-in; needs a personal PlatformNEX API key.",
   "types": "./types/index.d.ts",
   "userConfig": {

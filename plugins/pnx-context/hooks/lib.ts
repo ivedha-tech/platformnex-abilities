@@ -281,3 +281,17 @@ export const releaseBlock = (env: Environment, branch: string | undefined): stri
     : branch === undefined
       ? 'no branch checked out (detached HEAD)'
       : undefined
+
+/** `950`, `1.2k`, `3.4M`. */
+export const compact = (n: number): string => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)))
+
+/** Share of finished builds that passed, as a whole percentage; undefined with none finished. */
+export const passRate = (builds: string[]): number | undefined => {
+  const ok = builds.filter(b => b === 'ok').length
+  const bad = builds.filter(b => b === 'bad').length
+
+  return ok + bad === 0 ? undefined : Math.round((ok / (ok + bad)) * 100)
+}
+
+/** How many of these days were not healthy (unknown days are not counted). */
+export const daysAtRisk = (history: string[]): number => history.filter(s => s === 'at_risk' || s === 'degraded' || s === 'critical').length
