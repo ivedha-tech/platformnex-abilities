@@ -366,7 +366,8 @@ export const register: Register = (on, options) => {
           inputSchema: {
             type: 'object',
             properties: {
-              tool: { type: 'string', enum: [...LENS_TOOLS] },
+              // Not named `tool`: that key of a tool call is the tool's own name, so an argument called tool is never read.
+              lens: { type: 'string', enum: [...LENS_TOOLS] },
               systemRef: { type: 'string', description: "The System's ref, e.g. system:default/forcenex" },
               range: { type: 'string', enum: RANGES },
               person: { type: 'number', description: 'A userId from lens_team_roster' },
@@ -375,7 +376,7 @@ export const register: Register = (on, options) => {
               focus: { type: 'string' },
               id: { type: 'string', description: 'A saved view id, for lens_get_view' },
             },
-            required: ['tool'],
+            required: ['lens'],
           },
         })
         .catch(() => undefined)
@@ -410,7 +411,7 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: `${OWN_PREFIX}pnx_lens` }, async ($, e) => {
     const input = fields(e)
-    const name = typeof input['tool'] === 'string' ? input['tool'] : ''
+    const name = typeof input['lens'] === 'string' ? input['lens'] : ''
     if (!(LENS_TOOLS as readonly string[]).includes(name)) return { deny: `Unknown Lens tool. Use one of: ${LENS_TOOLS.join(', ')}.` }
 
     return serve($, cfg, name, lensArgs(input))
