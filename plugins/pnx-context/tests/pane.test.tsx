@@ -75,15 +75,19 @@ test('the pane shows the component, health, builds and pull requests, on every s
     const ui = await $.ui.mount({ ...PANE, surface })
     const has = async (text: RegExp) => (await ui.find({ type: 'Text', text }))?.text
 
-    expect(await has(/^Gateway$/)).toBe('Gateway')
+    expect(await has(/^GATEWAY$/)).toBe('GATEWAY')
     expect(await has(/platform/)).toMatch(/default\/platform/)
     // The component's own status wins over the System's.
     expect(await has(/at risk/)).toMatch(/● at risk/)
     expect(await has(/Build failing/)).toMatch(/Build failing on main/)
-    expect(await has(/^Pull requests/)).toBe('Pull requests (1)')
+    expect(await has(/^PULL REQUESTS$/)).toBe('PULL REQUESTS')
+    expect(await has(/^1 open/)).toBe('1 open')
     expect(await has(/Add by-repo route/)).toMatch(/Add by-repo route/)
-    expect(await has(/^Builds/)).toMatch(/^Builds/)
-    expect(await has(/^Health 3d/)).toMatch(/^Health 3d/)
+    expect(await has(/^builds/)).toMatch(/^builds ×2/)
+    expect(await has(/^health 3d/)).toMatch(/^health 3d/)
+    // The short notes beside the gauges.
+    expect(await has(/passing/)).toBe('50% passing')
+    expect(await has(/at risk$/)).toMatch(/1 day at risk|● at risk/)
     await ui.unmount()
   }
 
@@ -155,7 +159,7 @@ test('Start a release opens a draft only: confirm first, never production, never
   await ui.unmount()
 })
 
-test('a repository with several components gets one set of cards for each, told apart by name', { options: OPTIONS }, async ($, on) => {
+test('a repository with several components gets a tab for each; the tab chosen decides what is shown', { options: OPTIONS }, async ($, on) => {
   const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
   const sent: Sent[] = []
   const second = { ...BY_REPO.data.items[0], entityRef: 'component:default/web', name: 'web', title: 'Web' }
@@ -165,11 +169,15 @@ test('a repository with several components gets one set of cards for each, told 
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
 
-  expect((await ui.find({ type: 'Text', text: /^Gateway$/ }))?.text).toBe('Gateway')
-  expect((await ui.find({ type: 'Text', text: /^Web$/ }))?.text).toBe('Web')
-  expect((await ui.find({ type: 'Text', text: /^Pull requests \(1\) · gateway$/ }))?.text).toBeDefined()
-  expect((await ui.find({ type: 'Text', text: /^Pull requests \(1\) · web$/ }))?.text).toBeDefined()
-  expect((await ui.find({ type: 'Text', text: /^Releases · web$/ }))?.text).toBeDefined()
+  expect(await ui.find({ key: 'tab-component:default/gateway' })).toBeDefined()
+  expect(await ui.find({ key: 'tab-component:default/web' })).toBeDefined()
+  // The first component is shown until another tab is chosen.
+  expect((await ui.find({ type: 'Text', text: /^GATEWAY$/ }))?.text).toBe('GATEWAY')
+  expect(await ui.find({ type: 'Text', text: /^WEB$/ })).toBeUndefined()
+
+  await ui.press({ key: 'tab-component:default/web' })
+  expect((await ui.find({ type: 'Text', text: /^WEB$/ }))?.text).toBe('WEB')
+  expect(await ui.find({ type: 'Text', text: /^GATEWAY$/ })).toBeUndefined()
   await ui.unmount()
 })
 
