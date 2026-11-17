@@ -1,6 +1,6 @@
 # pnx-context
 
-A Claude Code mod that shows, beside your conversation, which PlatformNEX component the repo you are in belongs to: its health, open pull requests, open releases and small graphs. It can also open a **draft** release for a non-production environment. It never deploys.
+A Claude Code mod that shows, beside your conversation, which PlatformNEX component the repo you are in belongs to: its health, open releases and small graphs. It can also open a **draft** release for a non-production environment. It never deploys.
 
 ## Set up (once per person)
 
@@ -29,20 +29,17 @@ The portal address has a default, so only the key is needed. To use another envi
 | `/pnx-context setup` | print the commands to save your key |
 | `/pnx-context check` | test the address, the key and the lookup route, and say what to fix. It never shows the key |
 
-In the pane (when it has focus): `1`, `2`, `3` switch component tabs, `r` refreshes, `a` to `h` pick a repo from the list, `p` and `n` turn its page, `x` dismisses an ASK answer, `m` shows it in full or short.
+In the pane (when it has focus): `1`, `2`, `3` switch component tabs, `r` refreshes, `a` to `h` pick a repo from the list, `p` and `n` turn its page, `x` dismisses a plan, `m` shows it in full or short.
 
-## Ask PlatformNEX from Claude Code
+## Ask PlatformNEX for a change plan
 
-With the key saved, Claude gets two read-only tools. Ask in plain words and the answer is also drawn at the top of the pane (`ASK`), `x` dismisses it:
+With the key saved, Claude gets one read-only tool, `pnx_plan_change`. It is an optional extra: Claude uses it only when you ask it to plan a change **in PlatformNEX**, for example "use PlatformNEX to plan a change in speakupnex". Ordinary coding requests follow the repository's own rules.
 
-| You ask | Tool | The pane shows |
-| --- | --- | --- |
-| "create a change for me in speakupnex" | `pnx_plan_change` | a plan: **create a ticket in ServiceNEX first**, then draft the change, approval, a linked release, a check; the System's environments and approval gates |
-| "what is my team working on" | `pnx_lens` (`lens_team_activity`, `lens_team_blocked`, ...) | the facts Lens returned and its view titles |
+The plan is drawn at the top of the pane (`ASK`; `m` shows it in full, `x` dismisses it): **create a ticket in ServiceNEX first**, then draft the change, approval, a linked release and a check, with the System's environments and approval gates. If asking fails, the pane says why (for example, that this PlatformNEX does not have the tool yet).
 
-A plan is **a plan only**: nothing is created in PlatformNEX or ServiceNEX. Under a plan the pane shows **↗ Plan this in PlatformNEX (Agent mode)**: a link to the System's Components page that opens the assistant in Agent mode with `Plan: <the change>` typed and the component the pane identified as context. Opening it sends nothing; the person reads it and sends it. (Needs the portal to support assistant links, platformnex-agentic-portal PR #439.) Claude is told to hand the same link on in its reply. The pane also draws the answer of any `platformnex` MCP tool you have configured yourself. It keeps the last five answers, cut down and capped, and never a key, token or the raw response.
+A plan is **a plan only**: nothing is created in PlatformNEX or ServiceNEX. Under a plan the pane shows **↗ Plan this in PlatformNEX (Agent mode)**: a link to the System's Components page that opens the assistant in Agent mode with `Plan: <the change>` typed and the component the pane identified as context. Opening it sends nothing; the person reads it and sends it. Claude is told to hand the same link on in its reply. The pane keeps the last five plans, cut down and capped, and never a key, token or the raw response.
 
-Needs the gateway's `plan_propose` tool (platformnex-gateway PR #649) for plans, and the `lens` flag for Lens.
+Needs the gateway's `plan_propose` tool (platformnex-gateway PR #649) and, for the link, the portal's assistant links (platformnex-agentic-portal PR #439).
 
 ## If it shows an error
 
@@ -54,4 +51,4 @@ Run `/pnx-context check`. The usual causes:
 
 ## What it calls
 
-Everything is read-only except one draft release, and it uses only your own key. The two ask tools call the gateway's MCP proxy (`/api/catalog/mcp-proxy`), which offers read-only tools only, with a short token made from your key. See the pull request that added it for the full list. It never calls deploy, rollback, refresh or any live cost route.
+Everything is read-only except one draft release, and it uses only your own key. The plan tool calls the gateway's MCP proxy (`/api/catalog/mcp-proxy`), which offers read-only tools only, with a short token made from your key. See the pull request that added it for the full list. It never calls deploy, rollback, refresh or any live cost route.

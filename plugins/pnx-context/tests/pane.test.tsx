@@ -31,7 +31,6 @@ const BATCH = {
   success: true,
   data: {
     entries: [
-      { status: 'ok', payload: [{ id: '42', title: 'Add by-repo route', author: 'sam', status: 'open', url: 'https://github.com/ivedha-tech/gateway/pull/42', sourceBranch: 'feat/x', buildStatus: { state: 'success' } }] },
       { status: 'ok', payload: { pipelines: [{ status: 'SUCCESS', createTime: '1' }, { status: 'FAILURE', createTime: '2' }] } },
       null,
     ],
@@ -63,7 +62,7 @@ const stubWorld = (on: On, sent: Sent[], opts: { scan?: string; releases?: unkno
   })
 }
 
-test('the pane shows the component, health, builds and pull requests, on every surface', { options: OPTIONS }, async ($, on) => {
+test('the pane shows the component, health, builds and releases, and no pull requests, on every surface', { options: OPTIONS }, async ($, on) => {
   const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
   const sent: Sent[] = []
   stubWorld(on, sent)
@@ -80,9 +79,11 @@ test('the pane shows the component, health, builds and pull requests, on every s
     // The component's own status wins over the System's.
     expect(await has(/at risk/)).toMatch(/● at risk/)
     expect(await has(/Build failing/)).toMatch(/Build failing on main/)
-    expect(await has(/^PULL REQUESTS$/)).toBe('PULL REQUESTS')
-    expect(await has(/^1 open/)).toBe('1 open')
-    expect(await has(/Add by-repo route/)).toMatch(/Add by-repo route/)
+    // Pull requests are not drawn, and not asked for.
+    expect(await has(/PULL REQUESTS/)).toBeUndefined()
+    expect(await has(/pull requests/)).toBeUndefined()
+    expect(await has(/Add by-repo route/)).toBeUndefined()
+    expect(await has(/^RELEASES$/)).toBe('RELEASES')
     expect(await has(/^builds/)).toMatch(/^builds ×2/)
     expect(await has(/^health 3d/)).toMatch(/^health 3d/)
     // The short notes beside the gauges.

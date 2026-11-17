@@ -1,9 +1,10 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Data, Match, Ui } from '../types'
-import { bareName, handoffUrl, isPnxTool, parseAsk, pickActiveMatch, pushAsk, scrub, textOf } from '../hooks/skills'
+import { bareName, handoffUrl, parseAsk, pickActiveMatch, pushAsk, scrub } from '../hooks/skills'
 
 const NOW = Date.parse('2026-11-17T09:30:00Z')
+const TOOL = 'mcp__pnx-context__plan_propose'
 const PLAN = JSON.stringify({
   intent: 'Raise the upload limit',
   systemRef: 'system:default/speakupnex',
@@ -16,9 +17,10 @@ const PLAN = JSON.stringify({
   executed: false,
   note: 'Plan only. Nothing has been created.',
 })
+const ARGS = { systemRef: 'system:default/speakupnex', summary: 'Raise the upload limit' }
 
 test('a plan answer becomes ordered steps, risk and evidence, with nothing executed', async () => {
-  const ask = parseAsk('mcp__pnx-context__plan_propose', { systemRef: 'system:default/speakupnex', summary: 'Raise the upload limit' }, PLAN, false, NOW)
+  const ask = parseAsk(TOOL, ARGS, PLAN, false, NOW)
 
   expect(ask?.kind).toBe('plan')
   expect(ask?.title).toBe('CHANGE PLAN')
@@ -30,20 +32,20 @@ test('a plan answer becomes ordered steps, risk and evidence, with nothing execu
   expect(ask?.evidence).toEqual([{ k: 'environments', v: 'dit1 · prod' }])
 })
 
-test('a Lens team answer keeps its facts and block titles, not chart data', async () => {
-  const text = JSON.stringify({ callId: 'a-1', facts: ['Bob released twice', 'Sam merged 3 PRs'], blocks: [{ id: 'a-1.0', title: 'KPIs', kind: 'kpis' }] })
-  const ask = parseAsk('mcp__platformnex__lens_team_activity', { systemRef: 'system:default/shop' }, text, false, NOW)
+test('only the change plan is kept: the answer of any other tool is ignored', async () => {
+  const lens = JSON.stringify({ facts: ['Bob released twice'], blocks: [{ id: 'a', title: 'KPIs', kind: 'kpis' }] })
 
-  expect(ask?.kind).toBe('team')
-  expect(ask?.title).toBe('TEAM')
-  expect(ask?.facts).toEqual(['Bob released twice', 'Sam merged 3 PRs'])
-  expect(ask?.blocks).toEqual([{ title: 'KPIs', kind: 'kpis' }])
+  expect(parseAsk('mcp__platformnex__lens_team_activity', { systemRef: 'system:default/shop' }, lens, false, NOW)).toBeUndefined()
+  expect(parseAsk('mcp__platformnex__plan_propose', ARGS, PLAN, false, NOW)?.kind).toBe('plan')
+  expect(parseAsk('mcp__github__issue', {}, PLAN, false, NOW)).toBeUndefined()
 })
 
 test('a key, bearer or token in an answer is never kept', async () => {
-  const text = JSON.stringify({ facts: ['key pnx_abcd1234_secretsecret leaked', 'Authorization: Bearer abcdefghijklmnop', 'jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig'], blocks: [] })
-  const ask = parseAsk('mcp__platformnex__lens_cost', {}, text, false, NOW)
-  const all = JSON.stringify(ask)
+  const text = JSON.stringify({
+    planSteps: [{ label: 'use pnx_abcd1234_secretsecret', detail: 'Authorization: Bearer abcdefghijklmnop' }],
+    evidence: [{ k: 'jwt', v: 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig' }],
+  })
+  const all = JSON.stringify(parseAsk(TOOL, ARGS, text, false, NOW))
 
   expect(all).not.toMatch(/pnx_abcd1234/)
   expect(all).not.toMatch(/abcdefghijklmnop/)
@@ -51,24 +53,19 @@ test('a key, bearer or token in an answer is never kept', async () => {
   expect(scrub('pnx_abcd1234_xxxxxx', 40)).toBe('[hidden]')
 })
 
-test('an error, a non-JSON answer and a refusal never throw and say something plain', async () => {
-  expect(parseAsk('mcp__platformnex__lens_cost', {}, 'MCP error -32602: Tool plan_propose not found', true, NOW)?.note).toBe('MCP error -32602: Tool plan_propose not found')
-  expect(parseAsk('mcp__platformnex__lens_cost', {}, '', true, NOW)?.note).toBe('The tool reported an error.')
-  expect(parseAsk('mcp__platformnex__lens_cost', {}, 'failed with pnx_abcd1234_secretsecret', true, NOW)?.note).not.toMatch(/pnx_abcd1234/)
-  expect(parseAsk('mcp__platformnex__lens_cost', {}, 'plain words', false, NOW)?.facts).toEqual(['plain words'])
-  expect(parseAsk('mcp__platformnex__lens_cost', {}, JSON.stringify({ error: 'Lens is turned off.' }), false, NOW)?.note).toBe('Lens is turned off.')
-  expect(parseAsk('mcp__platformnex__lens_cost', null, undefined, false, NOW)?.note).toBeDefined()
-  expect(parseAsk('mcp__platformnex__lens_cost', {}, JSON.stringify({ unrelated: true }), false, NOW)?.note).toMatch(/Nothing to show/)
+test('an error says why, in the server’s own words with keys scrubbed, and bad input never throws', async () => {
+  expect(parseAsk(TOOL, ARGS, 'MCP error -32602: Tool plan_propose not found', true, NOW)).toMatchObject({ kind: 'error', note: 'MCP error -32602: Tool plan_propose not found' })
+  expect(parseAsk(TOOL, ARGS, '', true, NOW)?.note).toBe('The tool reported an error.')
+  expect(parseAsk(TOOL, ARGS, 'failed with pnx_abcd1234_secretsecret', true, NOW)?.note).not.toMatch(/pnx_abcd1234/)
+  expect(parseAsk(TOOL, ARGS, 'plain words', false, NOW)).toMatchObject({ kind: 'error', note: 'plain words' })
+  expect(parseAsk(TOOL, ARGS, JSON.stringify({ error: 'Not allowed.' }), false, NOW)?.note).toBe('Not allowed.')
+  expect(parseAsk(TOOL, null, undefined, false, NOW)?.note).toBeDefined()
+  expect(parseAsk(TOOL, ARGS, JSON.stringify({ unrelated: true }), false, NOW)?.note).toMatch(/Nothing to show/)
+  expect(parseAsk(TOOL, ARGS, 'x'.repeat(300_000), false, NOW)?.kind).toBe('error')
 })
 
-test('a very large answer is not parsed', async () => {
-  const ask = parseAsk('mcp__platformnex__lens_cost', {}, 'x'.repeat(300_000), false, NOW)
-  expect(ask?.facts).toEqual([])
-  expect(ask?.note).toBeDefined()
-})
-
-test('only the newest five are kept, and the same question replaces its older answer', async () => {
-  const make = (n: number, asked: string) => parseAsk('mcp__pnx-context__plan_propose', { systemRef: 'system:default/a', summary: asked }, PLAN, false, NOW + n)!
+test('only the newest five plans are kept, and the same question replaces its older answer', async () => {
+  const make = (n: number, asked: string) => parseAsk(TOOL, { systemRef: 'system:default/a', summary: asked }, PLAN, false, NOW + n)!
   let items = [] as ReturnType<typeof make>[]
   for (let i = 0; i < 7; i += 1) items = pushAsk(items, make(i, `change ${i}`))
   expect(items).toHaveLength(5)
@@ -79,16 +76,9 @@ test('only the newest five are kept, and the same question replaces its older an
   expect(items[0]?.asked).toBe('change 4')
 })
 
-test('tool names and results are read the way the engine spells them', async () => {
-  expect(bareName('mcp__platformnex__lens_team_activity')).toBe('lens_team_activity')
+test('tool names are read the way the engine spells them', async () => {
   expect(bareName('mcp__pnx-context__plan_propose')).toBe('plan_propose')
-  expect(isPnxTool('mcp__platformnex__lens_cost')).toBe(true)
-  expect(isPnxTool('mcp__pnx-context__plan_propose')).toBe(true)
-  expect(isPnxTool('mcp__github__issue')).toBe(false)
-  expect(isPnxTool(undefined)).toBe(false)
-  expect(textOf('{"a":1}')).toBe('{"a":1}')
-  expect(textOf({ content: [{ type: 'text', text: 'hi ' }, { type: 'image' }, { type: 'text', text: 'there' }] })).toBe('hi there')
-  expect(textOf({ content: [] })).toBeUndefined()
+  expect(bareName('mcp__platformnex__plan_propose')).toBe('plan_propose')
 })
 
 const BASE = 'https://portal.example.test'

@@ -18,7 +18,6 @@ import {
   parseBuilds,
   parseByRepo,
   parseHealth,
-  parsePrs,
   parseReleases,
   parseScan,
   passRate,
@@ -31,7 +30,7 @@ import {
   type ParsedMatch,
   type ScannedRepo,
 } from './lib'
-import { OWN_PREFIX, handoffUrl, isPnxTool, parseAsk, pickActiveMatch, pushAsk, scrub, textOf } from './skills'
+import { OWN_PREFIX, handoffUrl, parseAsk, pickActiveMatch, pushAsk, scrub } from './skills'
 import type { Ask, Asks, Data, Match, RepoView, Ui } from '../types'
 
 const PANE = 'pnx-context'
@@ -50,10 +49,10 @@ const EMPTY_UI: Ui = {}
 const EMPTY_ASKS: Asks = { items: [] }
 
 // Change a tag when the stored fields change: it declines what an earlier version stored.
-const data = atom({ plugin: 'pnx-context', key: 'data' } as const, EMPTY_DATA, { shape: 'data-1' })
+const data = atom({ plugin: 'pnx-context', key: 'data' } as const, EMPTY_DATA, { shape: 'data-2' })
 const ui = atom({ plugin: 'pnx-context', key: 'ui' } as const, EMPTY_UI, { shape: 'ui-5' })
-// What PlatformNEX tools answered lately, cut down to what the pane draws.
-const asks = atom({ plugin: 'pnx-context', key: 'asks' } as const, EMPTY_ASKS, { shape: 'asks-1' })
+// The change plans Claude asked for lately, cut down to what the pane draws.
+const asks = atom({ plugin: 'pnx-context', key: 'asks' } as const, EMPTY_ASKS, { shape: 'asks-2' })
 
 // Every repository under the folder the session is in, one line each: folder, remote, branch, short sha.
 const SCAN =
@@ -122,7 +121,6 @@ const loadDetail = async ($: EngineInterface, cfg: Cfg, match: ParsedMatch, forc
   const [health, snaps, releases] = await Promise.allSettled([
     system === undefined ? Promise.reject(new ApiFailure('not part of a System')) : systemHealth($, cfg, system),
     snapshots($, cfg, [
-      { domain: 'devops', resourceType: 'pr-list', resourceKey: match.entityRef },
       { domain: 'devops', resourceType: 'pipelines', resourceKey: match.entityRef },
       { domain: 'sre', resourceType: 'metrics-requests', resourceKey: match.entityRef },
     ]),
@@ -135,15 +133,11 @@ const loadDetail = async ($: EngineInterface, cfg: Cfg, match: ParsedMatch, forc
   if (snaps.status === 'fulfilled') {
     const entries = (snaps.value.data as { entries?: unknown } | undefined)?.entries
     const at = (i: number): { payload?: unknown; status?: unknown } | undefined => (Array.isArray(entries) ? (entries[i] as { payload?: unknown; status?: unknown } | null) ?? undefined : undefined)
-    const prs = at(0)
-    const builds = at(1)
-    const metrics = at(2)
-    out.prs = prs?.payload === undefined ? undefined : parsePrs(prs.payload)
+    const builds = at(0)
+    const metrics = at(1)
     out.builds = builds?.payload === undefined ? undefined : parseBuilds(builds.payload)
     const requests = metrics?.payload === undefined ? [] : parseSeries(metrics.payload)
     out.requests = requests.length === 0 ? undefined : requests
-    if (prs === undefined) notes.push('pull requests: not collected yet')
-    else if (prs.status === 'error') notes.push('pull requests: last refresh failed, showing the previous list')
   } else notes.push(`cached data: ${failure(snaps.reason)}`)
 
   if (releases.status === 'fulfilled') out.releases = parseReleases(releases.value.data)
@@ -239,13 +233,13 @@ const confirmDraft = async ($: EngineInterface, cfg: Cfg, pending: NonNullable<U
 }
 
 
-// Without this Claude answers "what is the team working on" from the local checkout. It names no one and no key.
+// Narrow on purpose: PlatformNEX is an optional extra, so Claude uses the plan tool only when the person asks for it.
 const ROUTING =
-  'PlatformNEX: when the person asks about a PlatformNEX System or its team (what a team is working on, who is blocked, review queue, health, cost, tests), call pnx_lens instead of reading the local repository or git history; ' +
-  "for 'what is the team working on' use lens_team_activity with range 7d, then lens_team_blocked. To create or plan a change in a System, call pnx_plan_change; it only plans and creates nothing, so say that. " +
-  'Name a System as system:default/<name>, e.g. system:default/speakupnex. The answer also appears in the PlatformNEX pane.'
+  'PlatformNEX: when the person asks you to plan a change in a PlatformNEX System using PlatformNEX, call pnx_plan_change. ' +
+  'It only plans and creates nothing, so say that. Name a System as system:default/<name>, e.g. system:default/speakupnex. ' +
+  'The plan also appears in the PlatformNEX pane. For ordinary coding requests, follow the repository\'s own rules and do not call it.'
 
-/** Keeps one tool answer for the pane and brings the pane up. It never throws. */
+/** Keeps one plan (or why asking failed) for the pane and brings the pane up. It never throws. */
 const record = async ($: EngineInterface, tool: string, input: unknown, text: string | undefined, isError: boolean): Promise<void> => {
   const ask = parseAsk(tool, input, text, isError, await $.clock.now())
   if (ask === undefined) return
@@ -255,27 +249,6 @@ const record = async ($: EngineInterface, tool: string, input: unknown, text: st
     .open({ id: PANE, title: TITLE })
     .then(() => $.ui.scroll({ in: PANE, to: 'start' }))
     .catch(() => undefined)
-}
-
-const LENS_TOOLS = ['lens_team_roster', 'lens_team_activity', 'lens_team_blocked', 'lens_review_queue', 'lens_team_stats', 'lens_ai_usage', 'lens_system_health', 'lens_cost', 'lens_tests', 'lens_topology', 'lens_errors_by_component', 'lens_slowest_routes', 'lens_get_view'] as const
-const RANGES = ['today', '7d', '30d', '90d']
-
-/** Only the arguments a Lens tool takes, each checked; anything else the model sent is dropped. */
-const lensArgs = (input: Record<string, unknown>): Record<string, unknown> => {
-  const out: Record<string, unknown> = {}
-  const text = (k: string, max: number): void => {
-    const v = input[k]
-    if (typeof v === 'string' && v.trim() !== '' && v.length <= max) out[k] = v.trim()
-  }
-  text('systemRef', 120)
-  text('environment', 40)
-  text('focus', 160)
-  text('id', 60)
-  if (typeof input['range'] === 'string' && RANGES.includes(input['range'])) out['range'] = input['range']
-  if (typeof input['groupBy'] === 'string' && ['feature', 'model', 'person'].includes(input['groupBy'])) out['groupBy'] = input['groupBy']
-  if (typeof input['person'] === 'number' && Number.isInteger(input['person']) && input['person'] > 0) out['person'] = input['person']
-
-  return out
 }
 
 type Options = Readonly<Record<string, unknown>>
@@ -346,14 +319,14 @@ async function handoff($: EngineInterface, cfg: Cfg, args: Record<string, unknow
   }
 }
 
-/** Asks the gateway as the person for the model's tool, keeps the answer for the pane, and answers the model with it. */
+/** Asks the gateway as the person for a change plan, keeps it for the pane, and answers the model with it. */
 async function serve($: EngineInterface, cfg: Cfg | undefined, name: string, args: Record<string, unknown>): Promise<{ result: string } | { deny: string }> {
   if (cfg === undefined) return { deny: 'PlatformNEX is not set up. Run /pnx-context setup.' }
   try {
     const reply = await mcpCall($, cfg, name, args)
     await record($, `${OWN_PREFIX}${name}`, args, reply.text, reply.isError).catch(() => undefined)
     if (reply.isError) return { deny: scrub(reply.text === '' ? 'the tool reported an error' : reply.text, 300) }
-    const link = name === 'plan_propose' ? await handoff($, cfg, args) : undefined
+    const link = await handoff($, cfg, args)
     const answer = reply.text === '' ? 'No answer.' : reply.text
 
     return { result: link === undefined ? answer : `${answer}\n\nTo plan this for real, open PlatformNEX Agent mode (nothing is sent until the person sends it): ${link}` }
@@ -370,43 +343,20 @@ export const register: Register = (on, options) => {
   const cfg = readCfg(options)
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'pnx-context', description: 'Show the PlatformNEX component, health and pull requests for this repo' })
+    await $.command.register({ name: 'pnx-context', description: 'Show the PlatformNEX component, health and releases for this repo' })
     void $.ui.open({ id: PANE, title: TITLE })
     if (cfg !== undefined) {
-      // The model's way to ask PlatformNEX. Both are read-only; the answer is also drawn in the pane.
+      // The model's way to ask PlatformNEX for a change plan. Read-only; the plan is also drawn in the pane.
       void $.tool
         .register({
           name: 'pnx_plan_change',
           isDeferred: false,
           description:
-            "Plan a change in a PlatformNEX System, e.g. 'create a change for me in speakupnex'. Returns the steps in order, starting with a ServiceNEX ticket, plus the System's environments and approval gates. It is a plan only: nothing is created, so tell the person and let them decide. The plan also appears in the PlatformNEX pane. The result ends with a link to PlatformNEX Agent mode, where the real plan is made: give that link to the person.",
+            "Plan a change in a PlatformNEX System, e.g. 'create a change for me in speakupnex'. Use it only when the person asks to plan the change in PlatformNEX. Returns the steps in order, starting with a ServiceNEX ticket, plus the System's environments and approval gates. It is a plan only: nothing is created, so tell the person and let them decide. The plan also appears in the PlatformNEX pane. The result ends with a link to PlatformNEX Agent mode, where the real plan is made: give that link to the person.",
           inputSchema: {
             type: 'object',
             properties: { systemRef: { type: 'string', description: "The System's ref, e.g. system:default/speakupnex" }, summary: { type: 'string', description: 'What the change is, in one sentence' } },
             required: ['systemRef', 'summary'],
-          },
-        })
-        .catch(() => undefined)
-      void $.tool
-        .register({
-          name: 'pnx_lens',
-          isDeferred: false,
-          description:
-            "Ask PlatformNEX Lens about a System: what the team is working on (lens_team_activity, lens_team_blocked, lens_review_queue, lens_team_stats), its health, cost, AI usage, tests or topology. Read-only. The answer also appears in the PlatformNEX pane. For 'what is my team working on' use lens_team_activity with range 7d, then lens_team_blocked.",
-          inputSchema: {
-            type: 'object',
-            properties: {
-              // Not named `tool`: that key of a tool call is the tool's own name, so an argument called tool is never read.
-              lens: { type: 'string', enum: [...LENS_TOOLS] },
-              systemRef: { type: 'string', description: "The System's ref, e.g. system:default/forcenex" },
-              range: { type: 'string', enum: RANGES },
-              person: { type: 'number', description: 'A userId from lens_team_roster' },
-              groupBy: { type: 'string', enum: ['feature', 'model', 'person'] },
-              environment: { type: 'string' },
-              focus: { type: 'string' },
-              id: { type: 'string', description: 'A saved view id, for lens_get_view' },
-            },
-            required: ['lens'],
           },
         })
         .catch(() => undefined)
@@ -427,8 +377,7 @@ export const register: Register = (on, options) => {
     return { text: cfg === undefined ? 'PlatformNEX pane opened, but it is not set up yet. Run /pnx-context setup.' : 'PlatformNEX pane opened. If it shows an error, run /pnx-context check.' }
   })
 
-  // The two tools above: ask the gateway as the person and answer the model with what it said.
-  // Tells the model when to use the two tools, once configured.
+  // Tells the model when to use the plan tool, once configured.
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
     if (cfg === undefined) return composed
@@ -447,16 +396,7 @@ export const register: Register = (on, options) => {
     return serve($, cfg, 'plan_propose', { systemRef: systemRef.slice(0, 120), summary: summary.slice(0, 500) })
   })
 
-  on('tool.call', { tool: `${OWN_PREFIX}pnx_lens` }, async ($, e) => {
-    const input = fields(e)
-    const name = typeof input['lens'] === 'string' ? input['lens'] : ''
-    if (!(LENS_TOOLS as readonly string[]).includes(name)) return { deny: `Unknown Lens tool. Use one of: ${LENS_TOOLS.join(', ')}.` }
-
-    return serve($, cfg, name, lensArgs(input))
-  })
-
-  // Notes which repository Claude's own file reads and edits touch, so the pane can follow the work; and keeps what a
-  // PlatformNEX tool answered (from any MCP config) so the pane can draw it. The call itself is never changed.
+  // Notes which repository Claude's own file reads and edits touch, so the pane can follow the work. The call itself is never changed.
   on('tool.call', async ($, e, next) => {
     try {
       const path = (e as unknown as { file_path?: unknown }).file_path
@@ -468,19 +408,7 @@ export const register: Register = (on, options) => {
       // Never let the pane get in the way of a tool call.
     }
 
-    const result = await next(e)
-
-    try {
-      const tool = (e as unknown as { tool?: unknown }).tool
-      if (isPnxTool(tool) && !tool.startsWith(OWN_PREFIX)) {
-        const out = result as unknown as { result?: unknown; isError?: unknown }
-        await record($, tool, e, textOf(out?.result), out?.isError === true)
-      }
-    } catch {
-      // Same: a failure here is the pane's, not the call's.
-    }
-
-    return result
+    return next(e)
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -546,57 +474,39 @@ export const register: Register = (on, options) => {
     const newest: Ask | undefined = heard.items.find(a => a.id !== u.askHidden)
     const askOpen = u.askOpen === true
     const planUrl = newest?.kind === 'plan' ? handoffUrl(cfg.base, newest.system, newest.asked, current === undefined ? undefined : { ref: current.entityRef, systemRefs: current.systemRefs }) : undefined
-    const FACTS_SHORT = 3
-    const expandable = (k: Ask): boolean => (k.kind === 'plan' ? (k.steps ?? []).length > 1 || (k.evidence ?? []).length > 0 : k.facts.length > FACTS_SHORT || (k.blocks ?? []).length > 0)
+    const expandable = (k: Ask): boolean => k.kind === 'plan' && ((k.steps ?? []).length > 1 || (k.evidence ?? []).length > 0)
     const askPanel = (k: Ask) => {
-      if (k.kind === 'plan') {
-        const steps = k.steps ?? []
-        const first = steps[0]
-        const rest = steps.slice(1)
+      if (k.kind === 'error') return panel(k.title, 'error', <Text dimColor>{ago(k.at, now)}</Text>, <Text>{cap(k.note ?? 'The tool reported an error.', inner * 2)}</Text>)
 
-        return panel(
-          k.title,
-          'claude',
-          <Text dimColor>{k.risk === undefined ? '' : `risk ${k.risk}`}</Text>,
-          askOpen ? (
-            <Box flexDirection="column">
-              <Text dimColor>{cap(k.note ?? 'Plan only. Nothing has been created.', inner)}</Text>
-              {steps.map((st, n) => (
-                <Box flexDirection="column" key={`ask-step-${n}`}>
-                  <Text bold={n === 0} color={n === 0 ? 'claude' : undefined}>{cap(`${n === 0 ? '▸' : ' '} ${n + 1} ${st.label}`, inner)}</Text>
-                  {n === 0 && <Text dimColor>{cap(`    ${st.detail}`, inner)}</Text>}
-                </Box>
-              ))}
-              {(k.evidence ?? []).map(ev => (
-                <Text dimColor>{cap(`${ev.k}  ${ev.v}`, inner)}</Text>
-              ))}
-            </Box>
-          ) : (
-            <Box flexDirection="column">
-              <Text dimColor>{cap(k.note ?? 'Plan only. Nothing has been created.', inner)}</Text>
-              {first !== undefined && <Text bold color="claude">{cap(`▸ 1 ${first.label}`, inner)}</Text>}
-              {rest.length > 0 && <Text dimColor>{cap(`  then: ${rest.map(st => st.label).join(' · ')}`, inner)}</Text>}
-              {(k.evidence ?? []).length > 0 && <Text dimColor>{cap((k.evidence ?? []).map(ev => `${ev.k} ${ev.v}`).join('   '), inner)}</Text>}
-            </Box>
-          ),
-        )
-      }
-
-      const shownFacts = askOpen ? k.facts : k.facts.slice(0, FACTS_SHORT)
-      const hidden = k.facts.length - shownFacts.length
+      const steps = k.steps ?? []
+      const first = steps[0]
+      const rest = steps.slice(1)
 
       return panel(
         k.title,
-        k.kind === 'team' ? 'suggestion' : 'inactive',
-        <Text dimColor>{ago(k.at, now)}</Text>,
-        <Box flexDirection="column">
-          {k.note !== undefined && <Text dimColor>{cap(k.note, inner * 2)}</Text>}
-          {shownFacts.map(f => (
-            <Text>{cap(`• ${f}`, askOpen ? inner * 2 : inner)}</Text>
-          ))}
-          {hidden > 0 && <Text dimColor>{`+ ${hidden} more`}</Text>}
-          {askOpen && (k.blocks ?? []).length > 0 && <Text dimColor>{cap(`views: ${(k.blocks ?? []).map(b => b.title).join(' · ')}`, inner * 2)}</Text>}
-        </Box>,
+        'claude',
+        <Text dimColor>{k.risk === undefined ? '' : `risk ${k.risk}`}</Text>,
+        askOpen ? (
+          <Box flexDirection="column">
+            <Text dimColor>{cap(k.note ?? 'Plan only. Nothing has been created.', inner)}</Text>
+            {steps.map((st, n) => (
+              <Box flexDirection="column" key={`ask-step-${n}`}>
+                <Text bold={n === 0} color={n === 0 ? 'claude' : undefined}>{cap(`${n === 0 ? '▸' : ' '} ${n + 1} ${st.label}`, inner)}</Text>
+                {n === 0 && <Text dimColor>{cap(`    ${st.detail}`, inner)}</Text>}
+              </Box>
+            ))}
+            {(k.evidence ?? []).map(ev => (
+              <Text dimColor>{cap(`${ev.k}  ${ev.v}`, inner)}</Text>
+            ))}
+          </Box>
+        ) : (
+          <Box flexDirection="column">
+            <Text dimColor>{cap(k.note ?? 'Plan only. Nothing has been created.', inner)}</Text>
+            {first !== undefined && <Text bold color="claude">{cap(`▸ 1 ${first.label}`, inner)}</Text>}
+            {rest.length > 0 && <Text dimColor>{cap(`  then: ${rest.map(st => st.label).join(' · ')}`, inner)}</Text>}
+            {(k.evidence ?? []).length > 0 && <Text dimColor>{cap((k.evidence ?? []).map(ev => `${ev.k} ${ev.v}`).join('   '), inner)}</Text>}
+          </Box>
+        ),
       )
     }
 
@@ -641,36 +551,6 @@ export const register: Register = (on, options) => {
             <Text color={accent === 'success' ? undefined : accent}>{cap(`⚠ ${r}`, inner)}</Text>
           ))}
           {m.detailNote !== undefined && <Text dimColor>{cap(m.detailNote, inner * 2)}</Text>}
-        </Box>,
-      )
-    }
-
-    const prPanel = (m: Match, repo: RepoView) => {
-      const failing = (m.prs ?? []).filter(p => p.build === 'failure' || p.build === 'error').length
-
-      return panel(
-        'PULL REQUESTS',
-        'suggestion',
-        <Text dimColor>{m.prs === undefined ? 'not collected yet' : `${m.prs.length} open${failing > 0 ? ` · ${failing} ✗` : ''}`}</Text>,
-        <Box flexDirection="column">
-          {m.prs !== undefined && m.prs.length === 0 && <Text dimColor>No open pull requests</Text>}
-          {(m.prs ?? []).slice(0, 6).map(pr => {
-            const bad = pr.build === 'failure' || pr.build === 'error'
-            const author = cap(pr.author, 12)
-            const room = Math.max(8, inner - 4 - pr.number.length - author.length - 2)
-
-            return (
-              <Box flexDirection="row" justifyContent="space-between">
-                <Box flexDirection="row">
-                  <Text color={pr.build === 'success' ? 'success' : bad ? 'error' : 'inactive'}>{pr.build === 'success' ? '✓' : bad ? '✗' : '·'} </Text>
-                  {pr.url === undefined ? <Text>#{pr.number}</Text> : <Link href={pr.url}>#{pr.number}</Link>}
-                  <Text bold={pr.sourceBranch !== undefined && pr.sourceBranch === repo.branch}>{`  ${cap(pr.title, room)}`}</Text>
-                </Box>
-                <Text dimColor>{author}</Text>
-              </Box>
-            )
-          })}
-          {(m.prs?.length ?? 0) > 6 && <Text dimColor>+{(m.prs?.length ?? 0) - 6} more</Text>}
         </Box>,
       )
     }
@@ -731,10 +611,6 @@ export const register: Register = (on, options) => {
               <Text dimColor>health</Text>
             </Box>
             <Box flexDirection="row">
-              <Text color="suggestion">■ </Text>
-              <Text dimColor>pull requests</Text>
-            </Box>
-            <Box flexDirection="row">
               <Text color="claude">■ </Text>
               <Text dimColor>releases</Text>
             </Box>
@@ -743,7 +619,7 @@ export const register: Register = (on, options) => {
         {d.status === 'error' && d.error !== undefined && <Text color="error">{cap(d.error, columns * 2)}</Text>}
         {rule}
 
-        {/* The newest answer from a PlatformNEX tool: a plan, the team's work, or the facts it returned. */}
+        {/* The newest change plan Claude asked PlatformNEX for (or why that failed), with a link to Agent mode. */}
         {newest !== undefined && (
           <Box flexDirection="column">
             <Box flexDirection="row" justifyContent="space-between">
@@ -887,8 +763,6 @@ export const register: Register = (on, options) => {
         {current !== undefined && active !== undefined && (
           <Box flexDirection="column">
             {componentPanel(current)}
-            {rule}
-            {prPanel(current, active)}
             {rule}
             {releasePanel(current, active)}
             {rule}
