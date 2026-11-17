@@ -1,5 +1,5 @@
 // Pure helpers: no engine calls, so they can be checked on their own.
-import type { Environment, Health, PullRequest, Release } from '../types'
+import type { Environment, Health, Release } from '../types'
 
 const BLOCKS = '▁▂▃▄▅▆▇█'
 
@@ -171,31 +171,6 @@ export const parseHealth = (data: unknown, entityRef: string): Health | undefine
     history: asArray(root?.['history']).map(h => word(asRecord(h)?.['status'])).slice(-14),
   }
 }
-
-/** An open pull request list from the cache payload, a plain array (or a paginated `{data}`). */
-export const parsePrs = (payload: unknown): PullRequest[] => {
-  const list = Array.isArray(payload) ? payload : asArray(asRecord(payload)?.['data'])
-
-  return list.flatMap(raw => {
-    const one = asRecord(raw)
-    const number = one?.['id'] === undefined ? undefined : String(one['id'])
-    if (one === undefined || number === undefined || (one['status'] !== undefined && one['status'] !== 'open')) return []
-
-    return [
-      {
-        number: cap(number, 12),
-        title: cap(one['title'], 80),
-        author: cap(one['author'] ?? one['createdBy'], 30),
-        url: safeHttpUrl(one['url']),
-        sourceBranch: str(one['sourceBranch']) === undefined ? undefined : cap(one['sourceBranch'], 80),
-        build: str(asRecord(one['buildStatus'])?.['state']),
-      },
-    ]
-  })
-}
-
-export const safeHttpUrl = (value: unknown): string | undefined =>
-  typeof value === 'string' && /^https?:\/\/[^\s]+$/i.test(value) ? value : undefined
 
 /** Build outcomes from the cached pipelines payload, oldest first: ok | bad | other. */
 export const parseBuilds = (payload: unknown, limit = 20): string[] => {

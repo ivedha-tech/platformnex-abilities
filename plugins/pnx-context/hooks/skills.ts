@@ -1,18 +1,15 @@
-// What the pane keeps of a PlatformNEX tool's answer: a small, capped, scrubbed record. Pure, so it can be tested without the engine.
+// What the pane keeps of a change plan: a small, capped, scrubbed record. Pure, so it can be tested without the engine.
 import { cap, rootContaining } from './lib'
 import type { Ask, Data, Match, Ui } from '../types'
 
-/** The tools the mod itself offers, and the server another config may call `platformnex`. */
+/** The tool the mod itself offers: `mcp__pnx-context__pnx_plan_change`. */
 export const OWN_PREFIX = 'mcp__pnx-context__'
-export const isPnxTool = (tool: unknown): tool is string => typeof tool === 'string' && (tool.startsWith('mcp__platformnex__') || tool.startsWith(OWN_PREFIX))
 
-/** The tool's own name without the server prefix: `plan_propose`, `lens_team_activity`, `pnx_plan_change`. */
+/** The tool's own name without the server prefix: `plan_propose`, `pnx_plan_change`. */
 export const bareName = (tool: string): string => tool.replace(/^mcp__[^_]+(?:_[^_]+)*?__/, '')
 
-const MAX_FACTS = 12
 const MAX_STEPS = 8
 const MAX_EVIDENCE = 8
-const MAX_BLOCKS = 8
 const MAX_RAW = 200_000
 
 // A key, a bearer or a JWT must never reach the screen or the stored state, whatever a server answers.
@@ -22,71 +19,42 @@ export const scrub = (value: unknown, max: number): string => cap(String(value ?
 const obj = (v: unknown): Record<string, unknown> | undefined => (v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined)
 const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : [])
 
-/** An MCP tool result's text: a string, or `{content:[{type:'text', text}]}`. */
-export const textOf = (result: unknown): string | undefined => {
-  if (typeof result === 'string') return result
-  const content = arr(obj(result)?.['content'])
-  const text = content.map(c => (obj(c)?.['type'] === 'text' && typeof obj(c)?.['text'] === 'string' ? (obj(c)?.['text'] as string) : '')).join('')
-
-  return text === '' ? undefined : text
-}
-
-const titleOf = (name: string): string =>
-  name === 'plan_propose' || name === 'pnx_plan_change'
-    ? 'CHANGE PLAN'
-    : name.startsWith('lens_team_')
-      ? 'TEAM'
-      : name.replace(/^lens_|^pnx_/, '').replace(/_/g, ' ').toUpperCase()
-
-/** Turns one tool answer into an Ask, or undefined when there is nothing worth showing. Never throws. */
+/** Turns a change-plan answer (or why asking failed) into an Ask. Any other tool's answer is not kept. Never throws. */
 export const parseAsk = (tool: string, input: unknown, text: string | undefined, isError: boolean, now: number): Ask | undefined => {
   try {
     const name = bareName(tool)
+    if (name !== 'plan_propose') return undefined
     const args = obj(input)
     const system = typeof args?.['systemRef'] === 'string' ? scrub((args['systemRef'] as string).replace(/^system:/i, ''), 60) : undefined
     const asked = typeof args?.['summary'] === 'string' ? scrub(args['summary'], 120) : undefined
-    const base = { id: `${now}-${name}`, tool: name, at: now, title: titleOf(name), system, asked }
-    // An error says why (the server's own words, scrubbed and cut), so a tool the server doesn't have reads as that, not as an empty panel.
-    if (isError || text === undefined || text.length > MAX_RAW) {
-      const why = isError && text !== undefined && text.trim() !== '' ? scrub(text, 160) : isError ? 'The tool reported an error.' : 'No answer to show.'
+    const base = { id: `${now}-${name}`, tool: name, at: now, title: 'CHANGE PLAN', system, asked }
+    const failed = (note: string): Ask => ({ ...base, kind: 'error', note })
 
-      return { ...base, kind: 'generic', facts: [], note: why }
-    }
+    // An error says why (the server's own words, scrubbed and cut), so a tool the server doesn't have reads as that, not as an empty panel.
+    if (isError || text === undefined || text.length > MAX_RAW) return failed(isError && text !== undefined && text.trim() !== '' ? scrub(text, 160) : isError ? 'The tool reported an error.' : 'No answer to show.')
 
     let body: unknown
     try {
       body = JSON.parse(text)
     } catch {
-      return { ...base, kind: 'generic', facts: [scrub(text, 200)] }
+      return failed(scrub(text, 160))
     }
     const data = obj(body)
-    if (data?.['error'] !== undefined && typeof data['error'] === 'string') return { ...base, kind: 'generic', facts: [], note: scrub(data['error'], 160) }
+    if (typeof data?.['error'] === 'string') return failed(scrub(data['error'], 160))
 
     const steps = arr(data?.['planSteps'])
-    if (steps.length > 0) {
-      return {
-        ...base,
-        kind: 'plan',
-        facts: [],
-        risk: typeof data?.['riskLevel'] === 'string' ? scrub(data['riskLevel'], 12) : undefined,
-        executed: data?.['executed'] === true,
-        note: typeof data?.['note'] === 'string' ? scrub(data['note'], 100) : undefined,
-        steps: steps.slice(0, MAX_STEPS).map(s => ({ label: scrub(obj(s)?.['label'], 60), detail: scrub(obj(s)?.['detail'], 120) })),
-        evidence: arr(data?.['evidence'])
-          .slice(0, MAX_EVIDENCE)
-          .map(e => ({ k: scrub(obj(e)?.['k'], 24), v: scrub(obj(e)?.['v'], 80) })),
-      }
-    }
-
-    const facts = arr(data?.['facts']).filter((f): f is string => typeof f === 'string')
-    const blocks = arr(data?.['blocks']).map(b => ({ title: scrub(obj(b)?.['title'], 60), kind: scrub(obj(b)?.['kind'], 16) }))
-    if (facts.length === 0 && blocks.length === 0) return { ...base, kind: 'generic', facts: [], note: 'Nothing to show for this answer.' }
+    if (steps.length === 0) return failed('Nothing to show for this answer.')
 
     return {
       ...base,
-      kind: name.startsWith('lens_team_') || name === 'lens_review_queue' ? 'team' : 'generic',
-      facts: facts.slice(0, MAX_FACTS).map(f => scrub(f, 160)),
-      blocks: blocks.slice(0, MAX_BLOCKS),
+      kind: 'plan',
+      risk: typeof data?.['riskLevel'] === 'string' ? scrub(data['riskLevel'], 12) : undefined,
+      executed: data?.['executed'] === true,
+      note: typeof data?.['note'] === 'string' ? scrub(data['note'], 100) : undefined,
+      steps: steps.slice(0, MAX_STEPS).map(s => ({ label: scrub(obj(s)?.['label'], 60), detail: scrub(obj(s)?.['detail'], 120) })),
+      evidence: arr(data?.['evidence'])
+        .slice(0, MAX_EVIDENCE)
+        .map(e => ({ k: scrub(obj(e)?.['k'], 24), v: scrub(obj(e)?.['v'], 80) })),
     }
   } catch {
     return undefined

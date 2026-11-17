@@ -9,16 +9,6 @@ export type Health = {
   history: string[]
 }
 
-export type PullRequest = {
-  number: string
-  title: string
-  author: string
-  url?: string
-  sourceBranch?: string
-  /** success | failure | pending | error | unknown */
-  build?: string
-}
-
 export type Release = { id: string; status: string; environment?: string; target?: string }
 
 export type Match = {
@@ -32,7 +22,6 @@ export type Match = {
   builds?: string[]
   /** Request counts over the metrics window, oldest first. */
   requests?: number[]
-  prs?: PullRequest[]
   releases?: Release[]
   /** When this match's detail was read, ms since the epoch. */
   detailAt?: number
@@ -63,17 +52,16 @@ export type Data = {
 /** One answer from a PlatformNEX tool, cut down to what the pane draws. Never holds a key, token or the raw response. */
 export type Ask = {
   id: string
-  /** The tool's own name, e.g. plan_propose, lens_team_activity. */
+  /** The tool's own name: plan_propose. */
   tool: string
   at: number
-  kind: 'plan' | 'team' | 'generic'
+  /** A change plan, or why asking for one failed. */
+  kind: 'plan' | 'error'
   title: string
   /** The System the question was about, without the system: prefix. */
   system?: string
   /** What was asked, for a plan. */
   asked?: string
-  facts: string[]
-  blocks?: { title: string; kind: string }[]
   /** Plan only. */
   risk?: string
   executed?: boolean
