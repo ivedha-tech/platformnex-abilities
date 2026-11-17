@@ -239,6 +239,12 @@ const confirmDraft = async ($: EngineInterface, cfg: Cfg, pending: NonNullable<U
 }
 
 
+// Without this Claude answers "what is the team working on" from the local checkout. It names no one and no key.
+const ROUTING =
+  'PlatformNEX: when the person asks about a PlatformNEX System or its team (what a team is working on, who is blocked, review queue, health, cost, tests), call pnx_lens instead of reading the local repository or git history; ' +
+  "for 'what is the team working on' use lens_team_activity with range 7d, then lens_team_blocked. To create or plan a change in a System, call pnx_plan_change; it only plans and creates nothing, so say that. " +
+  'Name a System as system:default/<name>, e.g. system:default/speakupnex. The answer also appears in the PlatformNEX pane.'
+
 /** Keeps one tool answer for the pane and brings the pane up. It never throws. */
 const record = async ($: EngineInterface, tool: string, input: unknown, text: string | undefined, isError: boolean): Promise<void> => {
   const ask = parseAsk(tool, input, text, isError, await $.clock.now())
@@ -349,6 +355,7 @@ export const register: Register = (on, options) => {
       void $.tool
         .register({
           name: 'pnx_plan_change',
+          isDeferred: false,
           description:
             "Plan a change in a PlatformNEX System, e.g. 'create a change for me in speakupnex'. Returns the steps in order, starting with a ServiceNEX ticket, plus the System's environments and approval gates. It is a plan only: nothing is created, so tell the person and let them decide. The plan also appears in the PlatformNEX pane.",
           inputSchema: {
@@ -361,6 +368,7 @@ export const register: Register = (on, options) => {
       void $.tool
         .register({
           name: 'pnx_lens',
+          isDeferred: false,
           description:
             "Ask PlatformNEX Lens about a System: what the team is working on (lens_team_activity, lens_team_blocked, lens_review_queue, lens_team_stats), its health, cost, AI usage, tests or topology. Read-only. The answer also appears in the PlatformNEX pane. For 'what is my team working on' use lens_team_activity with range 7d, then lens_team_blocked.",
           inputSchema: {
@@ -398,6 +406,14 @@ export const register: Register = (on, options) => {
   })
 
   // The two tools above: ask the gateway as the person and answer the model with what it said.
+  // Tells the model when to use the two tools, once configured.
+  on('prompt.compose', async ($, e, next) => {
+    const composed = await next(e)
+    if (cfg === undefined) return composed
+
+    return { sections: [...composed.sections, { id: 'pnx-context-routing', text: ROUTING, scope: 'session' as const }] }
+  })
+
   const fields = (e: unknown): Record<string, unknown> => (e !== null && typeof e === 'object' ? (e as Record<string, unknown>) : {})
 
   on('tool.call', { tool: `${OWN_PREFIX}pnx_plan_change` }, async ($, e) => {
