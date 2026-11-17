@@ -119,3 +119,35 @@ export function openReleases($: EngineInterface, cfg: Cfg, entityRef: string) {
 export function createDraftRelease($: EngineInterface, cfg: Cfg, body: { entityRef: string; environmentId: number; targetKind: 'branch'; targetRef: string }) {
   return call($, cfg, 'POST', '/api/catalog/releases', body)
 }
+
+/** One line of `/pnx-context check`: ok is undefined for a step skipped. */
+export type CheckStep = { label: string; ok: boolean | undefined; detail: string; fix?: string }
+
+/** Signs in with the key and asks the lookup route one harmless question. Reasons only; nothing from the key or the answer. */
+export async function checkAccess($: EngineInterface, cfg: Cfg): Promise<CheckStep[]> {
+  forgetToken()
+  const steps: CheckStep[] = []
+  try {
+    await bearer($, cfg)
+    steps.push({ label: 'key accepted', ok: true, detail: 'signed in' })
+  } catch (error) {
+    steps.push({ label: 'key accepted', ok: false, detail: error instanceof ApiFailure ? error.reason : 'could not check', fix: 'create a new key in the portal, then run /pnx-context setup' })
+    steps.push({ label: 'lookup route', ok: undefined, detail: 'skipped until the key works' })
+
+    return steps
+  }
+  try {
+    await byRepo($, cfg, 'https://github.com/owner/name')
+    steps.push({ label: 'lookup route', ok: true, detail: 'answers' })
+  } catch (error) {
+    const missing = error instanceof ApiFailure && error.status === 404
+    steps.push({
+      label: 'lookup route',
+      ok: false,
+      detail: missing ? 'this PlatformNEX does not have the repo lookup yet' : error instanceof ApiFailure ? error.reason : 'could not check',
+      fix: missing ? 'ask the platform team to deploy the by-repo route, or set the baseUrl option to an environment that has it' : undefined,
+    })
+  }
+
+  return steps
+}

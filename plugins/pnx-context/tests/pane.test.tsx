@@ -42,7 +42,7 @@ const json = (body: unknown, status = 200) => ({ value: { status, ok: status >= 
 type Sent = { url: string; method: string; headers: Record<string, string>; body?: string }
 
 /** Stubs what sits beneath the mod: the host's network, shell and repo. Records every request. */
-const stubWorld = (on: On, sent: Sent[], opts: { releases?: unknown; created?: unknown; byRepo?: unknown } = {}) => {
+const stubWorld = (on: On, sent: Sent[], opts: { releases?: unknown; created?: unknown; byRepo?: unknown; byRepoStatus?: number; tokenStatus?: number } = {}) => {
   on('command.register', () => ({ value: { command: 'pnx-context' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.status', () => ({ value: undefined }))
@@ -52,8 +52,8 @@ const stubWorld = (on: On, sent: Sent[], opts: { releases?: unknown; created?: u
   on('process.run', () => ({ value: { exitCode: 0, stdout: SCAN, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   on('http.fetch', (_, e) => {
     sent.push({ url: e.url, method: e.init?.method ?? 'GET', headers: (e.init?.headers ?? {}) as Record<string, string>, body: typeof e.init?.body === 'string' ? e.init.body : undefined })
-    if (e.url.endsWith('/auth/api-key-token')) return json({ success: true, data: { accessToken: 'short-lived', expiresIn: 900 } })
-    if (e.url.includes('/entities/by-repo')) return json(opts.byRepo ?? BY_REPO)
+    if (e.url.endsWith('/auth/api-key-token')) return opts.tokenStatus === undefined ? json({ success: true, data: { accessToken: 'short-lived', expiresIn: 900 } }) : json({ success: false, error: { message: 'This API key is invalid, expired or revoked.' } }, opts.tokenStatus)
+    if (e.url.includes('/entities/by-repo')) return opts.byRepoStatus === undefined ? json(opts.byRepo ?? BY_REPO) : json({ success: false }, opts.byRepoStatus)
     if (e.url.includes('/health')) return json(HEALTH)
     if (e.url.endsWith('/dashboard/batch')) return json(BATCH)
     if (e.url.includes('/releases') && (e.init?.method ?? 'GET') === 'POST') return json(opts.created ?? { success: true, data: { session: { id: 'rel-9' }, created: true } }, 201)
@@ -111,7 +111,9 @@ test('without a URL and key the pane says how to set up and nothing is sent', as
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
 
-  expect((await ui.find({ type: 'Text', text: /not set up yet/ }))?.text).toBe('PlatformNEX is not set up yet')
+  expect((await ui.find({ type: 'Text', text: /SET UP PLATFORMNEX/ }))?.text).toBe('SET UP PLATFORMNEX')
+  // The default address is set; only the key is missing.
+  expect((await ui.find({ type: 'Text', text: /of 2 set/ }))?.text).toBe('1 of 2 set')
   expect(sent).toEqual([])
   await ui.unmount()
 })
@@ -198,11 +200,93 @@ test('an open release to the same environment is reused, not duplicated', { opti
   await ui.unmount()
 })
 
+test('/pnx-context setup prints the commands to copy and never a key', { options: OPTIONS }, async ($, on) => {
+  const sent: Sent[] = []
+  stubWorld(on, sent)
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+
+  const { text = '' } = await $.command.run({ command: 'pnx-context', args: 'setup', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
+
+  expect(text).toMatch(/read -rs K/)
+  expect(text).toMatch(/claude plugin configure pnx-context@platformnex-abilities --values-stdin/)
+  expect(text).toMatch(/\/plugin configure pnx-context@platformnex-abilities/)
+  expect(text).toContain(`${BASE}/account/api-keys`)
+  expect(text).not.toContain(KEY)
+})
+
+test('/pnx-context check passes every step with a good key, and shows the address but never the key', { options: OPTIONS }, async ($, on) => {
+  const sent: Sent[] = []
+  stubWorld(on, sent)
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  sent.length = 0
+
+  const { text = '' } = await $.command.run({ command: 'pnx-context', args: 'check', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
+
+  expect(text).toMatch(/✓ URL set\s+https:\/\/portal\.example\.test/)
+  expect(text).toMatch(/✓ API key set\s+\(hidden\)/)
+  expect(text).toMatch(/✓ key accepted/)
+  expect(text).toMatch(/✓ lookup route/)
+  expect(text).toMatch(/Ready\./)
+  expect(text).not.toContain(KEY)
+  // It signs in afresh and asks the lookup route one question: nothing else.
+  expect(sent.map(r => r.url)).toEqual([`${BASE}/api/catalog/auth/api-key-token`, expect.stringContaining('/entities/by-repo')])
+})
+
+test('/pnx-context check says when the server has no repo lookup yet', { options: OPTIONS }, async ($, on) => {
+  const sent: Sent[] = []
+  stubWorld(on, sent, { byRepoStatus: 404 })
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+
+  const { text = '' } = await $.command.run({ command: 'pnx-context', args: 'check', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
+
+  expect(text).toMatch(/✓ key accepted/)
+  expect(text).toMatch(/✗ lookup route\s+this PlatformNEX does not have the repo lookup yet/)
+  expect(text).toMatch(/ask the platform team to deploy the by-repo route/)
+  expect(text).toMatch(/Not ready yet/)
+})
+
+test('/pnx-context check names a key that was not accepted and skips the rest', { options: OPTIONS }, async ($, on) => {
+  const sent: Sent[] = []
+  stubWorld(on, sent, { tokenStatus: 401 })
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+
+  const { text = '' } = await $.command.run({ command: 'pnx-context', args: 'check', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
+
+  expect(text).toMatch(/✗ key accepted\s+the API key was not accepted/)
+  expect(text).toMatch(/create a new key in the portal/)
+  expect(text).toMatch(/· lookup route\s+skipped/)
+  expect(text).not.toContain(KEY)
+})
+
+test('/pnx-context check with no key sends nothing and says what is missing', { options: { baseUrl: BASE } }, async ($, on) => {
+  const sent: Sent[] = []
+  stubWorld(on, sent)
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+
+  const { text = '' } = await $.command.run({ command: 'pnx-context', args: 'check', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
+
+  expect(text).toMatch(/✗ API key set\s+not set/)
+  expect(sent).toEqual([])
+})
+
+test('the pane says the server has no repo lookup yet, not just "not found"', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  const sent: Sent[] = []
+  stubWorld(on, sent, { byRepoStatus: 404 })
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  expect((await ui.find({ type: 'Text', text: /does not have the repo lookup yet/ }))?.text).toBeDefined()
+  await ui.unmount()
+})
+
 test('a state an earlier version stored is declined', { options: OPTIONS }, async ($, on) => {
   on('state.get', () => ({ value: { value: { repos: 'old' }, version: 1 } }))
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
 
-  expect((await ui.find({ type: 'Text', text: /not set up yet|No git repository/ }))?.text).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /SET UP PLATFORMNEX|No git repository/ }))?.text).toBeDefined()
   await ui.unmount()
 })

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { ApiFailure, byRepo, createDraftRelease, openReleases, snapshots, systemHealth, type Cfg } from './api'
+import { ApiFailure, byRepo, checkAccess, createDraftRelease, openReleases, snapshots, systemHealth, type Cfg, type CheckStep } from './api'
 import {
   ago,
   baseName,
@@ -99,7 +99,7 @@ const lookup = async ($: EngineInterface, cfg: Cfg, remote: string, force: boole
 
     return entry
   } catch (error) {
-    const entry = { at: now, failed: failure(error) }
+    const entry = { at: now, failed: error instanceof ApiFailure && error.status === 404 ? 'this PlatformNEX does not have the repo lookup yet' : failure(error) }
     lookups.set(key, entry)
 
     return entry
@@ -233,6 +233,62 @@ const confirmDraft = async ($: EngineInterface, cfg: Cfg, pending: NonNullable<U
   void refresh($, cfg, true).catch(() => undefined)
 }
 
+
+type Options = Readonly<Record<string, unknown>>
+
+const keyOf = (options: Options): string => (typeof options['apiKey'] === 'string' ? options['apiKey'].trim() : '')
+const urlOf = (options: Options): string => (typeof options['baseUrl'] === 'string' ? options['baseUrl'].trim() : '')
+
+/** What to run to save the key, as plain text for the transcript so it can be copied. Never contains a key. */
+const setupText = (options: Options): string => {
+  const url = urlOf(options)
+
+  return [
+    'Set up PlatformNEX (pnx-context)',
+    '',
+    `1. Create a personal API key in the portal: user menu, API keys${safeBaseUrl(url) === undefined ? '' : ` (${safeBaseUrl(url)}/account/api-keys)`}.`,
+    '   It starts with pnx_. Do not paste it into chat or a file.',
+    '',
+    '2. Save it. In your own terminal, this keeps the key out of your shell history:',
+    '',
+    `   read -rs K && printf '{"apiKey":"%s"}' "$K" | claude plugin configure pnx-context@platformnex-abilities --values-stdin; unset K`,
+    '',
+    '   Or inside Claude Code: /plugin configure pnx-context@platformnex-abilities',
+    '',
+    '3. Restart Claude Code, then run /pnx-context check.',
+    '',
+    url === '' ? 'Portal address: not set (add "baseUrl" to the same JSON).' : `Portal address: ${url}. To use another, add "baseUrl" to the same JSON.`,
+  ].join('\n')
+}
+
+const formatSteps = (steps: CheckStep[]): string =>
+  steps
+    .flatMap(step => [
+      `  ${step.ok === true ? '✓' : step.ok === false ? '✗' : '·'} ${step.label.padEnd(14)}${step.detail}`,
+      ...(step.ok === false && step.fix !== undefined ? [`    -> ${step.fix}`] : []),
+    ])
+    .join('\n')
+
+/** `/pnx-context check`: each step in order, with what to do about the first one that fails. The key is never shown. */
+const checkText = async ($: EngineInterface, options: Options): Promise<string> => {
+  const url = urlOf(options)
+  const key = keyOf(options)
+  const base = safeBaseUrl(url)
+  const steps: CheckStep[] = [
+    { label: 'URL set', ok: url !== '', detail: url === '' ? 'not set' : url, fix: url === '' ? 'run /pnx-context setup' : undefined },
+    { label: 'URL is https', ok: url === '' ? undefined : base !== undefined, detail: base !== undefined ? 'yes' : url === '' ? 'skipped' : 'it must look like https://host, with no path', fix: url !== '' && base === undefined ? 'set the baseUrl option again' : undefined },
+    { label: 'API key set', ok: key !== '', detail: key === '' ? 'not set' : '(hidden)', fix: key === '' ? 'run /pnx-context setup' : undefined },
+    { label: 'key format', ok: key === '' ? undefined : key.startsWith('pnx_'), detail: key === '' ? 'skipped' : key.startsWith('pnx_') ? 'looks right' : 'a personal key starts with pnx_', fix: key !== '' && !key.startsWith('pnx_') ? 'create a key in the portal (user menu, API keys)' : undefined },
+  ]
+  const cfg = readCfg(options)
+  const stop = steps.some(s => s.ok === false)
+  const rest = stop || cfg === undefined ? [{ label: 'key accepted', ok: undefined, detail: 'skipped until the steps above pass' } as CheckStep, { label: 'lookup route', ok: undefined, detail: 'skipped' } as CheckStep] : await checkAccess($, cfg)
+  const all = [...steps, ...rest]
+  const ready = all.every(s => s.ok === true)
+
+  return ['PlatformNEX check', '', formatSteps(all), '', ready ? 'Ready. Open the pane with /pnx-context.' : 'Not ready yet: fix the first ✗ above, restart Claude Code, then run /pnx-context check again.'].join('\n')
+}
+
 export const register: Register = (on, options) => {
   const cfg = readCfg(options)
 
@@ -246,10 +302,13 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'pnx-context' }, async ($, e) => {
+    const word = e.args.trim()
+    if (word === 'setup') return { text: setupText(options) }
+    if (word === 'check') return { text: await checkText($, options) }
     await $.ui.open({ id: PANE, title: TITLE })
     void refresh($, cfg, e.args.trim() === 'refresh').catch(() => undefined)
 
-    return { text: cfg === undefined ? 'PlatformNEX pane opened. Set the URL and key first: claude plugin configure pnx-context@platformnex-abilities.' : 'PlatformNEX pane opened.' }
+    return { text: cfg === undefined ? 'PlatformNEX pane opened, but it is not set up yet. Run /pnx-context setup.' : 'PlatformNEX pane opened. If it shows an error, run /pnx-context check.' }
   })
 
   // Notes which repository Claude's own file reads and edits touch, so the pane can follow the work.
@@ -294,15 +353,19 @@ export const register: Register = (on, options) => {
     )
 
     if (d.status === 'unconfigured' || cfg === undefined) {
+      const set = Number(safeBaseUrl(urlOf(options)) !== undefined) + Number(keyOf(options) !== '')
+
       return panel(
-        'PlatformNEX is not set up yet',
+        'SET UP PLATFORMNEX',
         'warning',
-        undefined,
+        <Text dimColor>{set} of 2 set</Text>,
         <Box flexDirection="column">
-          <Text dimColor>Set the portal URL and your API key with:</Text>
-          <Text>  claude plugin configure pnx-context@platformnex-abilities</Text>
-          <Text dimColor>The key comes from Settings, Account in the portal.</Text>
-          <Text dimColor>Then restart Claude Code and run /pnx-context.</Text>
+          <Text>1  Create an API key in the portal</Text>
+          <Text dimColor>   user menu, API keys</Text>
+          <Text>2  Save it: run /pnx-context setup</Text>
+          <Text dimColor>   and copy the command it prints</Text>
+          <Text>3  Restart Claude Code, then run</Text>
+          <Text dimColor>   /pnx-context check</Text>
         </Box>,
       )
     }
