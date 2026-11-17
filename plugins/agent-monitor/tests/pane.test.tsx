@@ -88,14 +88,19 @@ test('the pane shows agents, context use and RAM, on every surface', async ($, o
     const ui = await $.ui.mount({ ...PANE, surface })
     const has = async (text: RegExp) => (await ui.find({ type: 'Text', text }))?.text
 
-    expect(await has(/running ·/)).toMatch(/^1 running · 1 done · 0 failed$/)
-    expect(await has(/Explore/)).toMatch(/^Explore {2}find auth callers/)
+    // 29 agents in the repo's three plugins, plus the 2 built-in types spawned.
+    expect(await has(/active/)).toBe('1/31 active')
+    expect(await has(/done/)).toMatch(/1 done · 0 failed/)
+    expect(await has(/Explore/)).toMatch(/● Explore/)
     // 200 000 - 98 000 ms since it started.
     expect(await has(/1m42/)).toBe(' 1m42')
     expect(await has(/124k/)).toMatch(/62% 124k\/200k/)
     expect(await has(/Reading/)).toMatch(/▁▃▅ {2}Reading gateway\/auth\.ts/)
-    // No window known for the second agent: a count, no bar.
-    expect(await has(/900 tokens/)).toBe('900 tokens')
+    // Finished a moment ago: shown as done, not as a row of its own forever.
+    expect(await has(/general-purpose/)).toMatch(/general-purpose/)
+    // Idle agents of the repo are listed, grouped by plugin.
+    expect(await has(/○ code-reviewer/)).toMatch(/○ code-reviewer/)
+    expect(await has(/^0\/4$/)).toMatch(/0\/4/)
     expect(await has(/27%/)).toMatch(/27% 54k\/200k/)
     expect(await has(/claude/)).toMatch(/claude 1\.0 GB \(with children 1\.5 GB\)/)
     expect(await has(/system/)).toMatch(/system 8\.0 \/ 16 GB/)
@@ -103,10 +108,11 @@ test('the pane shows agents, context use and RAM, on every surface', async ($, o
   }
 })
 
-test('with no agents and no RAM reading the pane says so', async ($, on) => {
+test('with nothing running every agent is listed idle, and RAM is not measured', async ($, on) => {
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
 
-  expect((await ui.find({ type: 'Text', text: /No agents/ }))?.text).toMatch(/^No agents yet/)
+  expect((await ui.find({ type: 'Text', text: /active/ }))?.text).toBe('0/29 active')
+  expect((await ui.find({ type: 'Text', text: /code-developer/ }))?.text).toMatch(/○ code-developer/)
   expect((await ui.find({ type: 'Text', text: /RAM/ }))?.text).toBe('RAM  not measured yet')
   await ui.unmount()
 })
@@ -116,6 +122,6 @@ test('a snapshot an earlier version stored is declined', async ($, on) => {
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
 
-  expect((await ui.find({ type: 'Text', text: /No agents/ }))?.text).toMatch(/^No agents yet/)
+  expect((await ui.find({ type: 'Text', text: /active/ }))?.text).toBe('0/29 active')
   await ui.unmount()
 })

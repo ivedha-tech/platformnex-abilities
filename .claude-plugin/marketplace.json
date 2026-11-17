@@ -10,7 +10,7 @@
       "name": "agent-monitor",
       "source": "./plugins/agent-monitor",
       "description": "A pane showing each agent's progress and context use, plus the RAM this session and the machine are using. Opt-in; runs ps and vm_stat every 3 seconds.",
-      "version": "0.1.0"
+      "version": "0.2.0"
     },
     {
       "name": "pnx-context",
