@@ -29,7 +29,7 @@ The portal address has a default, so only the key is needed. To use another envi
 | `/pnx-context setup` | print the commands to save your key |
 | `/pnx-context check` | test the address, the key and the lookup route, and say what to fix. It never shows the key |
 
-In the pane (when it has focus): `1`, `2`, `3` switch component tabs, `r` refreshes, `a` to `h` pick a repo from the list, `p` and `n` turn its page, `x` dismisses an ASK answer.
+In the pane (when it has focus): `1`, `2`, `3` switch component tabs, `r` refreshes, `a` to `h` pick a repo from the list, `p` and `n` turn its page, `x` dismisses an ASK answer, `m` shows it in full or short.
 
 ## Ask PlatformNEX from Claude Code
 
