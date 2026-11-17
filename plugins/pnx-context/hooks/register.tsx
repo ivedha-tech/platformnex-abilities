@@ -269,18 +269,31 @@ export const register: Register = (on, options) => {
     const d = await read($, data)
     const u = await read($, ui)
     const columns = Math.max(24, e.props.bodyColumns ?? 40)
+    // Room inside a card: the border and one space of padding on each side.
+    const inner = Math.max(16, columns - 4)
     const now = await $.clock.now()
     const act = (run: () => Promise<unknown>) => () => void run().catch(() => undefined)
 
+    // Every section is one rounded card, its title on the first row, coloured by what the card is about.
+    const card = (title: string, accent: string, body: JSX.Element) => (
+      <Box flexDirection="column" borderStyle="round" borderColor={accent} paddingX={1} marginBottom={1}>
+        <Text bold color={accent}>
+          {cap(title, inner)}
+        </Text>
+        {body}
+      </Box>
+    )
+
     if (d.status === 'unconfigured' || cfg === undefined) {
-      return (
+      return card(
+        'PlatformNEX is not set up yet',
+        'warning',
         <Box flexDirection="column">
-          <Text bold>PlatformNEX is not set up yet</Text>
           <Text dimColor>Set the portal URL and your API key with:</Text>
           <Text>  claude plugin configure pnx-context@platformnex-abilities</Text>
           <Text dimColor>The key comes from Settings, Account in the portal.</Text>
           <Text dimColor>Then restart Claude Code and run /pnx-context.</Text>
-        </Box>
+        </Box>,
       )
     }
 
@@ -298,137 +311,164 @@ export const register: Register = (on, options) => {
         ))}
       </Box>
     )
+    const series = (label: string, content: JSX.Element) => (
+      <Box flexDirection="row">
+        <Text dimColor>{label.padEnd(12)}</Text>
+        {content}
+      </Box>
+    )
 
-    const matchView = (m: Match, repo: RepoView) => {
+    const componentCard = (m: Match) => {
       const status = m.health?.status ?? 'unknown'
-      const branchTouched = (branch: string | undefined) => branch !== undefined && branch === repo.branch
+      const accent = healthTone(status)
 
-      return (
+      return card(
+        m.title ?? m.name,
+        accent,
         <Box flexDirection="column">
-          <Text bold>{cap(m.title ?? m.name, columns - 2)}</Text>
-          <Text dimColor>{cap(m.systemRefs.map(s => s.replace(/^system:/, '')).join(', ') || 'no System', columns - 2)}</Text>
-          <Box flexDirection="row">
-            <Text color={healthTone(status)}>● {healthLabel(status)}</Text>
-            {m.health?.computedAt !== undefined && <Text dimColor> · {ago(m.health.computedAt, now)}</Text>}
+          <Text dimColor>{cap(m.systemRefs.map(s => s.replace(/^system:/, '')).join(', ') || 'no System', inner)}</Text>
+          <Box flexDirection="row" justifyContent="space-between">
+            <Text color={accent}>● {healthLabel(status)}</Text>
+            {m.health?.computedAt !== undefined && <Text dimColor>updated {ago(m.health.computedAt, now)}</Text>}
           </Box>
+          {((m.health?.history.length ?? 0) > 0 || (m.builds?.length ?? 0) > 0 || m.requests !== undefined) && <Text> </Text>}
+          {m.health !== undefined && m.health.history.length > 0 && series(`Health ${m.health.history.length}d`, strip(m.health.history, healthTone))}
+          {m.builds !== undefined && m.builds.length > 0 && series('Builds', strip(m.builds, buildTone))}
+          {m.requests !== undefined && series('Requests', <Text color="claude">{spark(m.requests)}</Text>)}
+          {(m.health?.reasons.length ?? 0) > 0 && <Text> </Text>}
           {(m.health?.reasons ?? []).map(r => (
-            <Text dimColor>{cap(`  ${r}`, columns)}</Text>
+            <Text dimColor>{cap(r, inner)}</Text>
           ))}
-
-          {m.health !== undefined && m.health.history.length > 0 && (
-            <Box flexDirection="column">
-              <Text dimColor>Health, last {m.health.history.length} days</Text>
-              {strip(m.health.history, healthTone)}
-            </Box>
-          )}
-          {m.builds !== undefined && m.builds.length > 0 && (
-            <Box flexDirection="column">
-              <Text dimColor>Builds, last {m.builds.length}</Text>
-              {strip(m.builds, buildTone)}
-            </Box>
-          )}
-          {m.requests !== undefined && (
-            <Box flexDirection="column">
-              <Text dimColor>Requests</Text>
-              <Text color="claude">{spark(m.requests)}</Text>
-            </Box>
-          )}
-
-          <Text bold>Open pull requests{m.prs === undefined ? '' : ` (${m.prs.length})`}</Text>
-          {m.prs === undefined && <Text dimColor>  none collected yet</Text>}
-          {(m.prs ?? []).slice(0, 6).map(pr => (
-            <Box flexDirection="row">
-              <Text color={pr.build === 'success' ? 'success' : pr.build === 'failure' || pr.build === 'error' ? 'error' : 'inactive'}>{pr.build === 'success' ? '✓' : pr.build === 'failure' || pr.build === 'error' ? '✗' : '·'} </Text>
-              {pr.url === undefined ? <Text>#{pr.number}</Text> : <Link href={pr.url}>#{pr.number}</Link>}
-              <Text bold={branchTouched(pr.sourceBranch)}> {cap(pr.title, Math.max(10, columns - 16))}</Text>
-            </Box>
-          ))}
-          {(m.prs?.length ?? 0) > 6 && <Text dimColor>  +{(m.prs?.length ?? 0) - 6} more</Text>}
-
-          {(m.releases?.length ?? 0) > 0 && (
-            <Box flexDirection="column">
-              <Text bold>Open releases</Text>
-              {(m.releases ?? []).map(r => (
-                <Text>{cap(`  ${r.environment ?? 'environment'} · ${r.status}${r.target === undefined ? '' : ` · ${r.target}`}`, columns)}</Text>
-              ))}
-            </Box>
-          )}
-
-          {m.detailNote !== undefined && <Text dimColor>{cap(m.detailNote, columns * 2)}</Text>}
-
-          <Text bold>Start a release (opens a draft only)</Text>
-          {m.environments.length === 0 && <Text dimColor>  no environments set up</Text>}
-          {m.environments.map(env => {
-            const block = releaseBlock(env, repo.branch)
-
-            return block === undefined ? (
-              <Button
-                key={`rel-${m.entityRef}-${env.id}`}
-                plain
-                onPress={act(() => update($, ui, x => ({ ...x, notice: undefined, pending: { entityRef: m.entityRef, environmentId: env.id, environmentName: env.name, branch: repo.branch ?? '', head: repo.head } })))}
-              >
-                {`  ${env.name}`}
-              </Button>
-            ) : (
-              <Text dimColor>{cap(`  ${env.name}: ${block}`, columns)}</Text>
-            )
-          })}
-        </Box>
+          {m.detailNote !== undefined && <Text dimColor>{cap(m.detailNote, inner * 2)}</Text>}
+        </Box>,
       )
     }
 
+    const prCard = (m: Match, repo: RepoView, many: boolean) =>
+      card(
+        `Pull requests${m.prs === undefined ? '' : ` (${m.prs.length})`}${many ? ` · ${m.name}` : ''}`,
+        'inactive',
+        <Box flexDirection="column">
+          {m.prs === undefined && <Text dimColor>None collected yet</Text>}
+          {m.prs !== undefined && m.prs.length === 0 && <Text dimColor>No open pull requests</Text>}
+          {(m.prs ?? []).slice(0, 6).map(pr => {
+            const failing = pr.build === 'failure' || pr.build === 'error'
+            const author = cap(pr.author, 12)
+            const room = Math.max(8, inner - 4 - pr.number.length - author.length - 2)
+
+            return (
+              <Box flexDirection="row" justifyContent="space-between">
+                <Box flexDirection="row">
+                  <Text color={pr.build === 'success' ? 'success' : failing ? 'error' : 'inactive'}>{pr.build === 'success' ? '✓' : failing ? '✗' : '·'} </Text>
+                  {pr.url === undefined ? <Text>#{pr.number}</Text> : <Link href={pr.url}>#{pr.number}</Link>}
+                  <Text bold={pr.sourceBranch !== undefined && pr.sourceBranch === repo.branch}>{`  ${cap(pr.title, room)}`}</Text>
+                </Box>
+                <Text dimColor>{author}</Text>
+              </Box>
+            )
+          })}
+          {(m.prs?.length ?? 0) > 6 && <Text dimColor>+{(m.prs?.length ?? 0) - 6} more</Text>}
+        </Box>,
+      )
+
+    const releaseCard = (m: Match, repo: RepoView, many: boolean) => {
+      const open = m.releases ?? []
+      const choices = m.environments.map(env => ({ env, block: releaseBlock(env, repo.branch) }))
+
+      return card(
+        `Releases${many ? ` · ${m.name}` : ''}`,
+        'inactive',
+        <Box flexDirection="column">
+          {open.length === 0 && <Text dimColor>No open releases</Text>}
+          {open.map(r => (
+            <Text>{cap(`${r.environment ?? 'environment'} · ${r.status}${r.target === undefined ? '' : ` · ${r.target}`}`, inner)}</Text>
+          ))}
+          <Text> </Text>
+          <Text bold>Open a draft release</Text>
+          {m.environments.length === 0 && <Text dimColor>No environments set up</Text>}
+          <Box flexDirection="row" flexWrap="wrap" gap={1}>
+            {choices
+              .filter(c => c.block === undefined)
+              .map(({ env }) => (
+                <Button
+                  key={`rel-${m.entityRef}-${env.id}`}
+                  onPress={act(() => update($, ui, x => ({ ...x, notice: undefined, pending: { entityRef: m.entityRef, environmentId: env.id, environmentName: env.name, branch: repo.branch ?? '', head: repo.head } })))}
+                >
+                  {env.name}
+                </Button>
+              ))}
+          </Box>
+          {choices
+            .filter(c => c.block !== undefined)
+            .map(({ env, block }) => (
+              <Text dimColor>{cap(`${env.name}: ${env.isProduction ? 'in the portal' : block}`, inner)}</Text>
+            ))}
+        </Box>,
+      )
+    }
+
+    const shown = active === undefined ? [] : active.matches.slice(0, MAX_MATCHES)
+
     return (
       <Box flexDirection="column">
-        <Box flexDirection="row">
-          <Text dimColor>{matched} of {d.repos.length} repos in PlatformNEX · {ago(d.at, now)} </Text>
-          <Button key="refresh" plain onPress={act(() => refresh($, cfg, true))}>
-            [refresh]
-          </Button>
+        <Box flexDirection="row" justifyContent="space-between">
+          <Text bold>PlatformNEX</Text>
+          <Box flexDirection="row">
+            <Text dimColor>{matched} of {d.repos.length} repos · {ago(d.at, now)} </Text>
+            <Button key="refresh" plain onPress={act(() => refresh($, cfg, true))}>
+              ⟳
+            </Button>
+          </Box>
         </Box>
+        <Text dimColor>{'─'.repeat(Math.max(10, columns))}</Text>
         {d.status === 'error' && d.error !== undefined && <Text color="error">{cap(d.error, columns * 2)}</Text>}
+        {active !== undefined && <Text dimColor>{cap(`${active.name}${active.branch === undefined ? '' : ` · ${active.branch}`}`, columns)}</Text>}
         <Text> </Text>
 
-        {u.notice !== undefined && (
-          <Box flexDirection="column">
-            <Text color="success">{cap(u.notice.text, columns * 2)}</Text>
-            {u.notice.url !== undefined && <Link href={u.notice.url}>Open in the portal</Link>}
-            <Text> </Text>
-          </Box>
-        )}
+        {u.notice !== undefined &&
+          card(
+            'Release',
+            u.notice.text.startsWith('Could not') ? 'error' : 'success',
+            <Box flexDirection="column">
+              <Text>{cap(u.notice.text, inner * 2)}</Text>
+              {u.notice.url !== undefined && <Link href={u.notice.url}>Open in the portal</Link>}
+            </Box>,
+          )}
 
-        {u.pending !== undefined && (
-          <Box flexDirection="column">
-            <Text bold>Open a draft release?</Text>
-            <Text>{cap(`  ${u.pending.entityRef.replace(/^component:/, '')} to ${u.pending.environmentName}`, columns)}</Text>
-            <Text>{cap(`  branch ${u.pending.branch}${u.pending.head === undefined ? '' : ` (local ${u.pending.head})`}`, columns)}</Text>
-            <Text dimColor>  This opens a draft. It does not deploy.</Text>
-            <Box flexDirection="row">
-              <Button key="confirm" variant="primary" onPress={act(() => confirmDraft($, cfg, u.pending!))}>
-                Open draft
-              </Button>
+        {u.pending !== undefined &&
+          card(
+            'Open a draft release?',
+            'warning',
+            <Box flexDirection="column">
+              <Text>{cap(`${u.pending.entityRef.replace(/^component:/, '')} to ${u.pending.environmentName}`, inner)}</Text>
+              <Text>{cap(`branch ${u.pending.branch}${u.pending.head === undefined ? '' : ` (local ${u.pending.head})`}`, inner)}</Text>
+              <Text dimColor>This opens a draft. It does not deploy.</Text>
               <Text> </Text>
-              <Button key="cancel" onPress={act(() => update($, ui, x => ({ ...x, pending: undefined })))}>
-                Cancel
-              </Button>
-            </Box>
-            <Text> </Text>
-          </Box>
-        )}
+              <Box flexDirection="row" gap={1}>
+                <Button key="confirm" variant="primary" onPress={act(() => confirmDraft($, cfg, u.pending!))}>
+                  Open draft
+                </Button>
+                <Button key="cancel" onPress={act(() => update($, ui, x => ({ ...x, pending: undefined })))}>
+                  Cancel
+                </Button>
+              </Box>
+            </Box>,
+          )}
 
         {active === undefined && d.repos.length === 0 && <Text dimColor>No git repository found here.</Text>}
-        {active !== undefined && (
+        {active !== undefined && active.lookup === 'none' && <Text dimColor>Not in the PlatformNEX catalog, or not visible to you.</Text>}
+        {active !== undefined && active.lookup === 'error' && <Text color="error">Could not look this repository up.</Text>}
+        {shown.map(m => (
           <Box flexDirection="column">
-            <Text dimColor>{cap(`${active.name}${active.branch === undefined ? '' : ` · ${active.branch}`}`, columns)}</Text>
-            {active.lookup === 'none' && <Text dimColor>Not in the PlatformNEX catalog, or not visible to you.</Text>}
-            {active.lookup === 'error' && <Text color="error">Could not look this repository up.</Text>}
-            {active.matches.slice(0, MAX_MATCHES).map(m => matchView(m, active))}
-            {active.matches.length > MAX_MATCHES && <Text dimColor>+{active.matches.length - MAX_MATCHES} more components in this repository</Text>}
+            {componentCard(m)}
+            {prCard(m, active!, shown.length > 1)}
+            {releaseCard(m, active!, shown.length > 1)}
           </Box>
-        )}
+        ))}
+        {active !== undefined && active.matches.length > MAX_MATCHES && <Text dimColor>+{active.matches.length - MAX_MATCHES} more components in this repository</Text>}
 
         {others.length > 0 && (
           <Box flexDirection="column">
-            <Text> </Text>
             <Text bold>Other repos here</Text>
             {others.slice(0, 15).map(r => (
               <Button key={`pick-${r.root}`} plain onPress={act(async () => { await update($, ui, x => ({ ...x, chosenRoot: r.root, pending: undefined, notice: undefined })); await refresh($, cfg, true) })}>
