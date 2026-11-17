@@ -1,0 +1,21 @@
+{
+  "name": "pnx-context",
+  "version": "0.1.0",
+  "description": "A sidebar pane showing which PlatformNEX component the repo you are in belongs to: health, open pull requests, open releases and small graphs. Read-only except one button that opens a draft release (never deploys). Opt-in; needs a personal PlatformNEX API key.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "baseUrl": {
+      "type": "string",
+      "title": "PlatformNEX URL",
+      "description": "The portal address, for example https://agentic-platformnex-portal.dit2.ivedha.dev (https only, no trailing slash).",
+      "required": false
+    },
+    "apiKey": {
+      "type": "string",
+      "title": "PlatformNEX API key",
+      "description": "A personal key (starts with pnx_) from Settings > Account in the portal. It acts as you, so keep it private.",
+      "sensitive": true,
+      "required": false
+    }
+  }
+}
