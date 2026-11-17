@@ -13,6 +13,12 @@
       "version": "0.1.0"
     },
     {
+      "name": "pnx-context",
+      "source": "./plugins/pnx-context",
+      "description": "A sidebar pane showing which PlatformNEX component the repo you are in belongs to: health, open pull requests, open releases and small graphs. Read-only except one button that opens a draft release (never deploys). Opt-in; needs a personal PlatformNEX API key.",
+      "version": "0.1.0"
+    },
+    {
       "name": "bencium-ux",
       "source": "./plugins/bencium-ux",
       "description": "Bencium UX and architecture skills: controlled, innovative and impact UX design, design audits, typography, agentic UX, AEO content, adaptive communication and architecture thinking lenses.",
