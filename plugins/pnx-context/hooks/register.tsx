@@ -31,7 +31,7 @@ import {
   type ParsedMatch,
   type ScannedRepo,
 } from './lib'
-import { OWN_PREFIX, isPnxTool, parseAsk, pushAsk, scrub, textOf } from './skills'
+import { OWN_PREFIX, handoffUrl, isPnxTool, parseAsk, pickActiveMatch, pushAsk, scrub, textOf } from './skills'
 import type { Ask, Asks, Data, Match, RepoView, Ui } from '../types'
 
 const PANE = 'pnx-context'
@@ -333,6 +333,19 @@ const checkText = async ($: EngineInterface, options: Options): Promise<string> 
   return ['PlatformNEX check', '', formatSteps(all), '', ready ? 'Ready. Open the pane with /pnx-context.' : 'Not ready yet: fix the first ✗ above, restart Claude Code, then run /pnx-context check again.'].join('\n')
 }
 
+/** The Agent mode link for a plan, naming the component the pane has identified. Never throws. */
+async function handoff($: EngineInterface, cfg: Cfg, args: Record<string, unknown>): Promise<string | undefined> {
+  try {
+    const system = typeof args['systemRef'] === 'string' ? args['systemRef'].replace(/^system:/i, '') : undefined
+    const asked = typeof args['summary'] === 'string' ? args['summary'] : undefined
+    const match = pickActiveMatch(await read($, data), await read($, ui), await $.session.cwd())
+
+    return handoffUrl(cfg.base, system, asked, match === undefined ? undefined : { ref: match.entityRef, systemRefs: match.systemRefs })
+  } catch {
+    return undefined
+  }
+}
+
 /** Asks the gateway as the person for the model's tool, keeps the answer for the pane, and answers the model with it. */
 async function serve($: EngineInterface, cfg: Cfg | undefined, name: string, args: Record<string, unknown>): Promise<{ result: string } | { deny: string }> {
   if (cfg === undefined) return { deny: 'PlatformNEX is not set up. Run /pnx-context setup.' }
@@ -340,8 +353,10 @@ async function serve($: EngineInterface, cfg: Cfg | undefined, name: string, arg
     const reply = await mcpCall($, cfg, name, args)
     await record($, `${OWN_PREFIX}${name}`, args, reply.text, reply.isError).catch(() => undefined)
     if (reply.isError) return { deny: scrub(reply.text === '' ? 'the tool reported an error' : reply.text, 300) }
+    const link = name === 'plan_propose' ? await handoff($, cfg, args) : undefined
+    const answer = reply.text === '' ? 'No answer.' : reply.text
 
-    return { result: reply.text === '' ? 'No answer.' : reply.text }
+    return { result: link === undefined ? answer : `${answer}\n\nTo plan this for real, open PlatformNEX Agent mode (nothing is sent until the person sends it): ${link}` }
   } catch (error) {
     return { deny: `PlatformNEX: ${failure(error)}` }
   }
@@ -360,7 +375,7 @@ export const register: Register = (on, options) => {
           name: 'pnx_plan_change',
           isDeferred: false,
           description:
-            "Plan a change in a PlatformNEX System, e.g. 'create a change for me in speakupnex'. Returns the steps in order, starting with a ServiceNEX ticket, plus the System's environments and approval gates. It is a plan only: nothing is created, so tell the person and let them decide. The plan also appears in the PlatformNEX pane.",
+            "Plan a change in a PlatformNEX System, e.g. 'create a change for me in speakupnex'. Returns the steps in order, starting with a ServiceNEX ticket, plus the System's environments and approval gates. It is a plan only: nothing is created, so tell the person and let them decide. The plan also appears in the PlatformNEX pane. The result ends with a link to PlatformNEX Agent mode, where the real plan is made: give that link to the person.",
           inputSchema: {
             type: 'object',
             properties: { systemRef: { type: 'string', description: "The System's ref, e.g. system:default/speakupnex" }, summary: { type: 'string', description: 'What the change is, in one sentence' } },
@@ -526,6 +541,7 @@ export const register: Register = (on, options) => {
 
     const newest: Ask | undefined = heard.items.find(a => a.id !== u.askHidden)
     const askOpen = u.askOpen === true
+    const planUrl = newest?.kind === 'plan' ? handoffUrl(cfg.base, newest.system, newest.asked, current === undefined ? undefined : { ref: current.entityRef, systemRefs: current.systemRefs }) : undefined
     const FACTS_SHORT = 3
     const expandable = (k: Ask): boolean => (k.kind === 'plan' ? (k.steps ?? []).length > 1 || (k.evidence ?? []).length > 0 : k.facts.length > FACTS_SHORT || (k.blocks ?? []).length > 0)
     const askPanel = (k: Ask) => {
@@ -740,6 +756,9 @@ export const register: Register = (on, options) => {
               </Box>
             </Box>
             {askPanel(newest)}
+            {newest.kind === 'plan' && planUrl !== undefined && (
+              <Link href={planUrl}>↗ Plan this in PlatformNEX (Agent mode)</Link>
+            )}
             {rule}
           </Box>
         )}

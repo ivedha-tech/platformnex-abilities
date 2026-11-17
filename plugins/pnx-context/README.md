@@ -40,7 +40,7 @@ With the key saved, Claude gets two read-only tools. Ask in plain words and the 
 | "create a change for me in speakupnex" | `pnx_plan_change` | a plan: **create a ticket in ServiceNEX first**, then draft the change, approval, a linked release, a check; the System's environments and approval gates |
 | "what is my team working on" | `pnx_lens` (`lens_team_activity`, `lens_team_blocked`, ...) | the facts Lens returned and its view titles |
 
-A plan is **a plan only**: nothing is created in PlatformNEX or ServiceNEX. The pane also draws the answer of any `platformnex` MCP tool you have configured yourself. It keeps the last five answers, cut down and capped, and never a key, token or the raw response.
+A plan is **a plan only**: nothing is created in PlatformNEX or ServiceNEX. Under a plan the pane shows **↗ Plan this in PlatformNEX (Agent mode)**: a link to the System's Components page that opens the assistant in Agent mode with `Plan: <the change>` typed and the component the pane identified as context. Opening it sends nothing; the person reads it and sends it. (Needs the portal to support assistant links, platformnex-agentic-portal PR #439.) Claude is told to hand the same link on in its reply. The pane also draws the answer of any `platformnex` MCP tool you have configured yourself. It keeps the last five answers, cut down and capped, and never a key, token or the raw response.
 
 Needs the gateway's `plan_propose` tool (platformnex-gateway PR #649) for plans, and the `lens` flag for Lens.
 
