@@ -1,6 +1,6 @@
 // What the pane keeps of a PlatformNEX tool's answer: a small, capped, scrubbed record. Pure, so it can be tested without the engine.
-import { cap } from './lib'
-import type { Ask } from '../types'
+import { cap, rootContaining } from './lib'
+import type { Ask, Data, Match, Ui } from '../types'
 
 /** The tools the mod itself offers, and the server another config may call `platformnex`. */
 export const OWN_PREFIX = 'mcp__pnx-context__'
@@ -91,3 +91,35 @@ export const parseAsk = (tool: string, input: unknown, text: string | undefined,
 /** Newest first, no repeat of the same tool and question, at most `max`. */
 export const pushAsk = (items: Ask[], next: Ask, max = 5): Ask[] =>
   [next, ...items.filter(a => !(a.tool === next.tool && a.system === next.system && a.asked === next.asked))].slice(0, max)
+
+/**
+ * The component the pane is showing: the repository the person chose, else the one the session is in, else the one Claude's
+ * own tool calls touched last, else the first catalog match; then the tab they picked, else its first component.
+ * The same choice the pane makes when it draws the repository panels.
+ */
+export const pickActiveMatch = (d: Data, u: Ui, cwd: string): Match | undefined => {
+  const roots = d.repos.map(r => r.root)
+  const cwdRoot = d.repos.length === 0 ? undefined : rootContaining(cwd, roots)
+  const activeRoot = [u.chosenRoot, cwdRoot, u.touchedRoot].find(r => r !== undefined && roots.includes(r)) ?? d.repos.find(r => r.matches.length > 0)?.root
+  const matches = d.repos.find(r => r.root === activeRoot)?.matches ?? []
+
+  return matches.find(m => m.entityRef === u.activeEntity) ?? matches[0]
+}
+
+const SEGMENT = /^[A-Za-z0-9._-]+$/
+const ENTITY = /^(component|system):[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/i
+
+/**
+ * A link into PlatformNEX's Agent mode ("Plan a change"): the System's Components page, with `Plan: <the change>` in the
+ * composer and the identified component as context. Opening it sends nothing. `system` is `<ns>/<name>` (no `system:`).
+ * The component is only named when it belongs to that System; anything that does not look like a ref is left out.
+ */
+export const handoffUrl = (base: string, system: string | undefined, asked: string | undefined, component: { ref: string; systemRefs: string[] } | undefined): string | undefined => {
+  const parts = (system ?? '').split('/')
+  if (parts.length !== 2 || !parts.every(p => SEGMENT.test(p))) return undefined
+  const query = new URLSearchParams({ assistant: 'agent', text: `Plan: ${scrub(asked ?? '', 300)}`.trim() })
+  const inSystem = component !== undefined && ENTITY.test(component.ref) && component.systemRefs.some(r => r.toLowerCase() === `system:${system}`.toLowerCase())
+  if (component !== undefined && inSystem) query.set('entity', component.ref)
+
+  return `${base}/s/${encodeURIComponent(parts[0] ?? '')}/${encodeURIComponent(parts[1] ?? '')}/components?${query.toString()}`
+}

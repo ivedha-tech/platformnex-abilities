@@ -31,7 +31,7 @@ import {
   type ParsedMatch,
   type ScannedRepo,
 } from './lib'
-import { OWN_PREFIX, isPnxTool, parseAsk, pushAsk, scrub, textOf } from './skills'
+import { OWN_PREFIX, handoffUrl, isPnxTool, parseAsk, pickActiveMatch, pushAsk, scrub, textOf } from './skills'
 import type { Ask, Asks, Data, Match, RepoView, Ui } from '../types'
 
 const PANE = 'pnx-context'
@@ -51,7 +51,7 @@ const EMPTY_ASKS: Asks = { items: [] }
 
 // Change a tag when the stored fields change: it declines what an earlier version stored.
 const data = atom({ plugin: 'pnx-context', key: 'data' } as const, EMPTY_DATA, { shape: 'data-1' })
-const ui = atom({ plugin: 'pnx-context', key: 'ui' } as const, EMPTY_UI, { shape: 'ui-4' })
+const ui = atom({ plugin: 'pnx-context', key: 'ui' } as const, EMPTY_UI, { shape: 'ui-5' })
 // What PlatformNEX tools answered lately, cut down to what the pane draws.
 const asks = atom({ plugin: 'pnx-context', key: 'asks' } as const, EMPTY_ASKS, { shape: 'asks-1' })
 
@@ -250,8 +250,11 @@ const record = async ($: EngineInterface, tool: string, input: unknown, text: st
   const ask = parseAsk(tool, input, text, isError, await $.clock.now())
   if (ask === undefined) return
   await update($, asks, a => ({ items: pushAsk(a.items, ask) }))
-  await update($, ui, u => ({ ...u, askHidden: undefined }))
-  void $.ui.open({ id: PANE, title: TITLE }).catch(() => undefined)
+  await update($, ui, u => ({ ...u, askHidden: undefined, askOpen: false }))
+  void $.ui
+    .open({ id: PANE, title: TITLE })
+    .then(() => $.ui.scroll({ in: PANE, to: 'start' }))
+    .catch(() => undefined)
 }
 
 const LENS_TOOLS = ['lens_team_roster', 'lens_team_activity', 'lens_team_blocked', 'lens_review_queue', 'lens_team_stats', 'lens_ai_usage', 'lens_system_health', 'lens_cost', 'lens_tests', 'lens_topology', 'lens_errors_by_component', 'lens_slowest_routes', 'lens_get_view'] as const
@@ -330,6 +333,19 @@ const checkText = async ($: EngineInterface, options: Options): Promise<string> 
   return ['PlatformNEX check', '', formatSteps(all), '', ready ? 'Ready. Open the pane with /pnx-context.' : 'Not ready yet: fix the first ✗ above, restart Claude Code, then run /pnx-context check again.'].join('\n')
 }
 
+/** The Agent mode link for a plan, naming the component the pane has identified. Never throws. */
+async function handoff($: EngineInterface, cfg: Cfg, args: Record<string, unknown>): Promise<string | undefined> {
+  try {
+    const system = typeof args['systemRef'] === 'string' ? args['systemRef'].replace(/^system:/i, '') : undefined
+    const asked = typeof args['summary'] === 'string' ? args['summary'] : undefined
+    const match = pickActiveMatch(await read($, data), await read($, ui), await $.session.cwd())
+
+    return handoffUrl(cfg.base, system, asked, match === undefined ? undefined : { ref: match.entityRef, systemRefs: match.systemRefs })
+  } catch {
+    return undefined
+  }
+}
+
 /** Asks the gateway as the person for the model's tool, keeps the answer for the pane, and answers the model with it. */
 async function serve($: EngineInterface, cfg: Cfg | undefined, name: string, args: Record<string, unknown>): Promise<{ result: string } | { deny: string }> {
   if (cfg === undefined) return { deny: 'PlatformNEX is not set up. Run /pnx-context setup.' }
@@ -337,8 +353,10 @@ async function serve($: EngineInterface, cfg: Cfg | undefined, name: string, arg
     const reply = await mcpCall($, cfg, name, args)
     await record($, `${OWN_PREFIX}${name}`, args, reply.text, reply.isError).catch(() => undefined)
     if (reply.isError) return { deny: scrub(reply.text === '' ? 'the tool reported an error' : reply.text, 300) }
+    const link = name === 'plan_propose' ? await handoff($, cfg, args) : undefined
+    const answer = reply.text === '' ? 'No answer.' : reply.text
 
-    return { result: reply.text === '' ? 'No answer.' : reply.text }
+    return { result: link === undefined ? answer : `${answer}\n\nTo plan this for real, open PlatformNEX Agent mode (nothing is sent until the person sends it): ${link}` }
   } catch (error) {
     return { deny: `PlatformNEX: ${failure(error)}` }
   }
@@ -357,7 +375,7 @@ export const register: Register = (on, options) => {
           name: 'pnx_plan_change',
           isDeferred: false,
           description:
-            "Plan a change in a PlatformNEX System, e.g. 'create a change for me in speakupnex'. Returns the steps in order, starting with a ServiceNEX ticket, plus the System's environments and approval gates. It is a plan only: nothing is created, so tell the person and let them decide. The plan also appears in the PlatformNEX pane.",
+            "Plan a change in a PlatformNEX System, e.g. 'create a change for me in speakupnex'. Returns the steps in order, starting with a ServiceNEX ticket, plus the System's environments and approval gates. It is a plan only: nothing is created, so tell the person and let them decide. The plan also appears in the PlatformNEX pane. The result ends with a link to PlatformNEX Agent mode, where the real plan is made: give that link to the person.",
           inputSchema: {
             type: 'object',
             properties: { systemRef: { type: 'string', description: "The System's ref, e.g. system:default/speakupnex" }, summary: { type: 'string', description: 'What the change is, in one sentence' } },
@@ -522,29 +540,46 @@ export const register: Register = (on, options) => {
     const pageRepos = ordered.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE)
 
     const newest: Ask | undefined = heard.items.find(a => a.id !== u.askHidden)
+    const askOpen = u.askOpen === true
+    const planUrl = newest?.kind === 'plan' ? handoffUrl(cfg.base, newest.system, newest.asked, current === undefined ? undefined : { ref: current.entityRef, systemRefs: current.systemRefs }) : undefined
+    const FACTS_SHORT = 3
+    const expandable = (k: Ask): boolean => (k.kind === 'plan' ? (k.steps ?? []).length > 1 || (k.evidence ?? []).length > 0 : k.facts.length > FACTS_SHORT || (k.blocks ?? []).length > 0)
     const askPanel = (k: Ask) => {
       if (k.kind === 'plan') {
         const steps = k.steps ?? []
+        const first = steps[0]
+        const rest = steps.slice(1)
 
         return panel(
           k.title,
           'claude',
-          <Text dimColor>{k.risk === undefined ? '' : `risk: ${k.risk}`}</Text>,
-          <Box flexDirection="column">
-            <Text dimColor>{cap(k.note ?? 'Plan only. Nothing has been created.', inner)}</Text>
-            {steps.map((s, i) => (
-              <Box flexDirection="column" key={`ask-step-${i}`}>
-                <Text bold={i === 0} color={i === 0 ? 'claude' : undefined}>{cap(`${i === 0 ? '▸' : ' '} ${i + 1} ○ ${s.label}`, inner)}</Text>
-                {i === 0 && <Text dimColor>{cap(`      ${s.detail}`, inner)}</Text>}
-              </Box>
-            ))}
-            {(k.evidence ?? []).length > 0 && <Text> </Text>}
-            {(k.evidence ?? []).map(ev => (
-              <Text dimColor>{cap(`${ev.k}  ${ev.v}`, inner)}</Text>
-            ))}
-          </Box>,
+          <Text dimColor>{k.risk === undefined ? '' : `risk ${k.risk}`}</Text>,
+          askOpen ? (
+            <Box flexDirection="column">
+              <Text dimColor>{cap(k.note ?? 'Plan only. Nothing has been created.', inner)}</Text>
+              {steps.map((st, n) => (
+                <Box flexDirection="column" key={`ask-step-${n}`}>
+                  <Text bold={n === 0} color={n === 0 ? 'claude' : undefined}>{cap(`${n === 0 ? '▸' : ' '} ${n + 1} ${st.label}`, inner)}</Text>
+                  {n === 0 && <Text dimColor>{cap(`    ${st.detail}`, inner)}</Text>}
+                </Box>
+              ))}
+              {(k.evidence ?? []).map(ev => (
+                <Text dimColor>{cap(`${ev.k}  ${ev.v}`, inner)}</Text>
+              ))}
+            </Box>
+          ) : (
+            <Box flexDirection="column">
+              <Text dimColor>{cap(k.note ?? 'Plan only. Nothing has been created.', inner)}</Text>
+              {first !== undefined && <Text bold color="claude">{cap(`▸ 1 ${first.label}`, inner)}</Text>}
+              {rest.length > 0 && <Text dimColor>{cap(`  then: ${rest.map(st => st.label).join(' · ')}`, inner)}</Text>}
+              {(k.evidence ?? []).length > 0 && <Text dimColor>{cap((k.evidence ?? []).map(ev => `${ev.k} ${ev.v}`).join('   '), inner)}</Text>}
+            </Box>
+          ),
         )
       }
+
+      const shownFacts = askOpen ? k.facts : k.facts.slice(0, FACTS_SHORT)
+      const hidden = k.facts.length - shownFacts.length
 
       return panel(
         k.title,
@@ -552,10 +587,11 @@ export const register: Register = (on, options) => {
         <Text dimColor>{ago(k.at, now)}</Text>,
         <Box flexDirection="column">
           {k.note !== undefined && <Text dimColor>{cap(k.note, inner * 2)}</Text>}
-          {k.facts.map(f => (
-            <Text>{cap(`• ${f}`, inner * 2)}</Text>
+          {shownFacts.map(f => (
+            <Text>{cap(`• ${f}`, askOpen ? inner * 2 : inner)}</Text>
           ))}
-          {(k.blocks ?? []).length > 0 && <Text dimColor>{cap(`views: ${(k.blocks ?? []).map(b => b.title).join(' · ')}`, inner * 2)}</Text>}
+          {hidden > 0 && <Text dimColor>{`+ ${hidden} more`}</Text>}
+          {askOpen && (k.blocks ?? []).length > 0 && <Text dimColor>{cap(`views: ${(k.blocks ?? []).map(b => b.title).join(' · ')}`, inner * 2)}</Text>}
         </Box>,
       )
     }
@@ -708,11 +744,21 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column">
             <Box flexDirection="row" justifyContent="space-between">
               <Text bold>{cap(`ASK · ${newest.asked ?? newest.system ?? newest.title.toLowerCase()}`, Math.max(12, columns - 6))}</Text>
-              <Button key="ask-dismiss" plain hotkey="x" onPress={act(() => update($, ui, x => ({ ...x, askHidden: newest.id })))}>
-                x
-              </Button>
+              <Box flexDirection="row" gap={1}>
+                {expandable(newest) && (
+                  <Button key="ask-toggle" plain hotkey="m" onPress={act(() => update($, ui, x => ({ ...x, askOpen: x.askOpen !== true })))}>
+                    {askOpen ? 'm collapse' : 'm expand'}
+                  </Button>
+                )}
+                <Button key="ask-dismiss" plain hotkey="x" onPress={act(() => update($, ui, x => ({ ...x, askHidden: newest.id, askOpen: false })))}>
+                  x
+                </Button>
+              </Box>
             </Box>
             {askPanel(newest)}
+            {newest.kind === 'plan' && planUrl !== undefined && (
+              <Link href={planUrl}>↗ Plan this in PlatformNEX (Agent mode)</Link>
+            )}
             {rule}
           </Box>
         )}

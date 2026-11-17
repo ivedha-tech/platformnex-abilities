@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
-import { bareName, isPnxTool, parseAsk, pushAsk, scrub, textOf } from '../hooks/skills'
+import type { Data, Match, Ui } from '../types'
+import { bareName, handoffUrl, isPnxTool, parseAsk, pickActiveMatch, pushAsk, scrub, textOf } from '../hooks/skills'
 
 const NOW = Date.parse('2026-11-17T09:30:00Z')
 const PLAN = JSON.stringify({
@@ -86,4 +87,54 @@ test('tool names and results are read the way the engine spells them', async () 
   expect(textOf('{"a":1}')).toBe('{"a":1}')
   expect(textOf({ content: [{ type: 'text', text: 'hi ' }, { type: 'image' }, { type: 'text', text: 'there' }] })).toBe('hi there')
   expect(textOf({ content: [] })).toBeUndefined()
+})
+
+const BASE = 'https://portal.example.test'
+const COMPONENT = { ref: 'component:default/speakupnex-api', systemRefs: ['system:default/speakupnex'] }
+
+test('the Agent mode link names the System page, the sentence and the component, and sends nothing itself', async () => {
+  const url = new URL(handoffUrl(BASE, 'default/speakupnex', 'Raise the upload limit', COMPONENT) ?? '')
+
+  expect(url.origin).toBe(BASE)
+  expect(url.pathname).toBe('/s/default/speakupnex/components')
+  expect(url.searchParams.get('assistant')).toBe('agent')
+  expect(url.searchParams.get('text')).toBe('Plan: Raise the upload limit')
+  expect(url.searchParams.get('entity')).toBe('component:default/speakupnex-api')
+})
+
+test('the link leaves the component out when it is in another System or does not look like a ref', async () => {
+  const other = new URL(handoffUrl(BASE, 'default/speakupnex', 'x change', { ref: 'component:default/other-api', systemRefs: ['system:default/forcenex'] }) ?? '')
+  expect(other.searchParams.has('entity')).toBe(false)
+
+  const odd = new URL(handoffUrl(BASE, 'default/speakupnex', 'x change', { ref: 'https://evil.example/x', systemRefs: ['system:default/speakupnex'] }) ?? '')
+  expect(odd.searchParams.has('entity')).toBe(false)
+
+  expect(new URL(handoffUrl(BASE, 'default/speakupnex', 'x change', undefined) ?? '').searchParams.has('entity')).toBe(false)
+})
+
+test('no link for a System that is not <ns>/<name>, and a key in the sentence is not put in the link', async () => {
+  for (const bad of [undefined, '', 'speakupnex', 'a/b/c', 'default/../x', 'default/speak upnex', 'default/<x>']) expect(handoffUrl(BASE, bad, 'x change', COMPONENT)).toBeUndefined()
+  expect(handoffUrl(BASE, 'default/speakupnex', 'use pnx_abcd1234_secretsecret here', COMPONENT)).not.toMatch(/pnx_abcd1234/)
+})
+
+const match = (ref: string, system: string): Match => ({ entityRef: ref, name: ref.split('/')[1] ?? ref, systemRefs: [system], environments: [] })
+const repos = (): Data => ({
+  at: 1,
+  status: 'ok',
+  repos: [
+    { root: '/w/a', name: 'a', lookup: 'found', matches: [match('component:default/a-api', 'system:default/a'), match('component:default/a-web', 'system:default/a')] },
+    { root: '/w/b', name: 'b', lookup: 'found', matches: [match('component:default/b-api', 'system:default/b')] },
+    { root: '/w/c', name: 'c', lookup: 'none', matches: [] },
+  ],
+})
+
+test('the component the pane shows is the chosen repository, else where the session is, else the first match', async () => {
+  const d = repos()
+  const ui: Ui = {}
+
+  expect(pickActiveMatch(d, ui, '/w/b/src')?.entityRef).toBe('component:default/b-api')
+  expect(pickActiveMatch(d, ui, '/elsewhere')?.entityRef).toBe('component:default/a-api')
+  expect(pickActiveMatch(d, { chosenRoot: '/w/b' }, '/w/a')?.entityRef).toBe('component:default/b-api')
+  expect(pickActiveMatch(d, { activeEntity: 'component:default/a-web' }, '/w/a')?.entityRef).toBe('component:default/a-web')
+  expect(pickActiveMatch({ at: 1, status: 'ok', repos: [] }, ui, '/w/a')).toBeUndefined()
 })

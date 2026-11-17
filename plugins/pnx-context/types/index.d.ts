@@ -91,6 +91,8 @@ export type Ui = {
   touchedRoot?: string
   /** The id of the answer the person dismissed with x. */
   askHidden?: string
+  /** True while the ASK answer is shown in full (m). */
+  askOpen?: boolean
   /** Which page of the repository list is showing, from 0. */
   page?: number
   /** The component tab the person picked, by entity ref; empty means the first. */
