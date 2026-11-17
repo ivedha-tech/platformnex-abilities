@@ -42,7 +42,7 @@ const json = (body: unknown, status = 200) => ({ value: { status, ok: status >= 
 type Sent = { url: string; method: string; headers: Record<string, string>; body?: string }
 
 /** Stubs what sits beneath the mod: the host's network, shell and repo. Records every request. */
-const stubWorld = (on: On, sent: Sent[], opts: { releases?: unknown; created?: unknown } = {}) => {
+const stubWorld = (on: On, sent: Sent[], opts: { releases?: unknown; created?: unknown; byRepo?: unknown } = {}) => {
   on('command.register', () => ({ value: { command: 'pnx-context' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.status', () => ({ value: undefined }))
@@ -53,7 +53,7 @@ const stubWorld = (on: On, sent: Sent[], opts: { releases?: unknown; created?: u
   on('http.fetch', (_, e) => {
     sent.push({ url: e.url, method: e.init?.method ?? 'GET', headers: (e.init?.headers ?? {}) as Record<string, string>, body: typeof e.init?.body === 'string' ? e.init.body : undefined })
     if (e.url.endsWith('/auth/api-key-token')) return json({ success: true, data: { accessToken: 'short-lived', expiresIn: 900 } })
-    if (e.url.includes('/entities/by-repo')) return json(BY_REPO)
+    if (e.url.includes('/entities/by-repo')) return json(opts.byRepo ?? BY_REPO)
     if (e.url.includes('/health')) return json(HEALTH)
     if (e.url.endsWith('/dashboard/batch')) return json(BATCH)
     if (e.url.includes('/releases') && (e.init?.method ?? 'GET') === 'POST') return json(opts.created ?? { success: true, data: { session: { id: 'rel-9' }, created: true } }, 201)
@@ -80,9 +80,10 @@ test('the pane shows the component, health, builds and pull requests, on every s
     // The component's own status wins over the System's.
     expect(await has(/at risk/)).toMatch(/● at risk/)
     expect(await has(/Build failing/)).toMatch(/Build failing on main/)
-    expect(await has(/Open pull requests/)).toBe('Open pull requests (1)')
+    expect(await has(/^Pull requests/)).toBe('Pull requests (1)')
     expect(await has(/Add by-repo route/)).toMatch(/Add by-repo route/)
-    expect(await has(/Builds, last 2/)).toBe('Builds, last 2')
+    expect(await has(/^Builds/)).toMatch(/^Builds/)
+    expect(await has(/^Health 3d/)).toMatch(/^Health 3d/)
     await ui.unmount()
   }
 
@@ -133,7 +134,7 @@ test('Start a release opens a draft only: confirm first, never production, never
 
   // Production has no button, only the reason.
   expect(await ui.find({ key: 'rel-component:default/gateway-2' })).toBeUndefined()
-  expect((await ui.find({ type: 'Text', text: /production: production releases are opened in the portal/ }))?.text).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /production: in the portal/ }))?.text).toBeDefined()
 
   const before = sent.length
   await ui.press({ key: 'rel-component:default/gateway-1' })
@@ -151,6 +152,24 @@ test('Start a release opens a draft only: confirm first, never production, never
   expect(JSON.parse(posts[0]?.body ?? '{}')).toEqual({ entityRef: 'component:default/gateway', environmentId: 1, targetKind: 'branch', targetRef: 'feat/x' })
   expect(sent.some(r => /\/(deploy|rollback|complete|canary|config|proposals)\b/.test(r.url))).toBe(false)
   expect((await ui.find({ type: 'Text', text: /Draft release opened/ }))?.text).toMatch(/Review and deploy it in the portal/)
+  await ui.unmount()
+})
+
+test('a repository with several components gets one set of cards for each, told apart by name', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  const second = { ...BY_REPO.data.items[0], entityRef: 'component:default/web', name: 'web', title: 'Web' }
+  stubWorld(on, sent, { byRepo: { success: true, data: { items: [BY_REPO.data.items[0], second] } } })
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  expect((await ui.find({ type: 'Text', text: /^Gateway$/ }))?.text).toBe('Gateway')
+  expect((await ui.find({ type: 'Text', text: /^Web$/ }))?.text).toBe('Web')
+  expect((await ui.find({ type: 'Text', text: /^Pull requests \(1\) · gateway$/ }))?.text).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /^Pull requests \(1\) · web$/ }))?.text).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /^Releases · web$/ }))?.text).toBeDefined()
   await ui.unmount()
 })
 
