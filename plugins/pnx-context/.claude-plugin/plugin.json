@@ -1,19 +1,20 @@
 {
   "name": "pnx-context",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A sidebar pane showing which PlatformNEX component the repo you are in belongs to: health, open pull requests, open releases and small graphs. Read-only except one button that opens a draft release (never deploys). Opt-in; needs a personal PlatformNEX API key.",
   "types": "./types/index.d.ts",
   "userConfig": {
     "baseUrl": {
       "type": "string",
       "title": "PlatformNEX URL",
-      "description": "The portal address, for example https://agentic-platformnex-portal.dit2.ivedha.dev (https only, no trailing slash).",
+      "description": "The PlatformNEX portal address (https only, no trailing slash). The default is the one most people want; change it only to use another environment.",
+      "default": "https://agentic-platformnex-portal.prod.ivedha.dev",
       "required": false
     },
     "apiKey": {
       "type": "string",
       "title": "PlatformNEX API key",
-      "description": "A personal key (starts with pnx_) from Settings > Account in the portal. It acts as you, so keep it private.",
+      "description": "A personal key that starts with pnx_. Create it in the portal (user menu, API keys). It acts as you, so never paste it into chat or a file. Run /pnx-context setup in Claude Code for the exact command to save it.",
       "sensitive": true,
       "required": false
     }
