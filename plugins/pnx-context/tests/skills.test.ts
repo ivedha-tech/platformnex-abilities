@@ -52,7 +52,9 @@ test('a key, bearer or token in an answer is never kept', async () => {
 })
 
 test('an error, a non-JSON answer and a refusal never throw and say something plain', async () => {
-  expect(parseAsk('mcp__platformnex__lens_cost', {}, 'boom', true, NOW)?.note).toMatch(/error/)
+  expect(parseAsk('mcp__platformnex__lens_cost', {}, 'MCP error -32602: Tool plan_propose not found', true, NOW)?.note).toBe('MCP error -32602: Tool plan_propose not found')
+  expect(parseAsk('mcp__platformnex__lens_cost', {}, '', true, NOW)?.note).toBe('The tool reported an error.')
+  expect(parseAsk('mcp__platformnex__lens_cost', {}, 'failed with pnx_abcd1234_secretsecret', true, NOW)?.note).not.toMatch(/pnx_abcd1234/)
   expect(parseAsk('mcp__platformnex__lens_cost', {}, 'plain words', false, NOW)?.facts).toEqual(['plain words'])
   expect(parseAsk('mcp__platformnex__lens_cost', {}, JSON.stringify({ error: 'Lens is turned off.' }), false, NOW)?.note).toBe('Lens is turned off.')
   expect(parseAsk('mcp__platformnex__lens_cost', null, undefined, false, NOW)?.note).toBeDefined()

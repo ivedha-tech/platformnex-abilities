@@ -358,7 +358,11 @@ async function serve($: EngineInterface, cfg: Cfg | undefined, name: string, arg
 
     return { result: link === undefined ? answer : `${answer}\n\nTo plan this for real, open PlatformNEX Agent mode (nothing is sent until the person sends it): ${link}` }
   } catch (error) {
-    return { deny: `PlatformNEX: ${failure(error)}` }
+    const reason = `PlatformNEX: ${failure(error)}`
+    // The pane shows it too, or a failed ask would leave nothing on screen.
+    await record($, `${OWN_PREFIX}${name}`, args, reason, true).catch(() => undefined)
+
+    return { deny: reason }
   }
 }
 
