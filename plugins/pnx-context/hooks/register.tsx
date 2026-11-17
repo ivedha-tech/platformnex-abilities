@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { ApiFailure, byRepo, checkAccess, createDraftRelease, openReleases, snapshots, systemHealth, type Cfg, type CheckStep } from './api'
+import { ApiFailure, byRepo, checkAccess, createDraftRelease, mcpCall, openReleases, snapshots, systemHealth, type Cfg, type CheckStep } from './api'
 import {
   ago,
   baseName,
@@ -31,7 +31,8 @@ import {
   type ParsedMatch,
   type ScannedRepo,
 } from './lib'
-import type { Data, Match, RepoView, Ui } from '../types'
+import { OWN_PREFIX, isPnxTool, parseAsk, pushAsk, scrub, textOf } from './skills'
+import type { Ask, Asks, Data, Match, RepoView, Ui } from '../types'
 
 const PANE = 'pnx-context'
 const TITLE = 'PlatformNEX'
@@ -46,10 +47,13 @@ const PAGE_SIZE = 8
 
 const EMPTY_DATA: Data = { at: 0, status: 'unconfigured', repos: [] }
 const EMPTY_UI: Ui = {}
+const EMPTY_ASKS: Asks = { items: [] }
 
 // Change a tag when the stored fields change: it declines what an earlier version stored.
 const data = atom({ plugin: 'pnx-context', key: 'data' } as const, EMPTY_DATA, { shape: 'data-1' })
-const ui = atom({ plugin: 'pnx-context', key: 'ui' } as const, EMPTY_UI, { shape: 'ui-3' })
+const ui = atom({ plugin: 'pnx-context', key: 'ui' } as const, EMPTY_UI, { shape: 'ui-4' })
+// What PlatformNEX tools answered lately, cut down to what the pane draws.
+const asks = atom({ plugin: 'pnx-context', key: 'asks' } as const, EMPTY_ASKS, { shape: 'asks-1' })
 
 // Every repository under the folder the session is in, one line each: folder, remote, branch, short sha.
 const SCAN =
@@ -235,6 +239,36 @@ const confirmDraft = async ($: EngineInterface, cfg: Cfg, pending: NonNullable<U
 }
 
 
+/** Keeps one tool answer for the pane and brings the pane up. It never throws. */
+const record = async ($: EngineInterface, tool: string, input: unknown, text: string | undefined, isError: boolean): Promise<void> => {
+  const ask = parseAsk(tool, input, text, isError, await $.clock.now())
+  if (ask === undefined) return
+  await update($, asks, a => ({ items: pushAsk(a.items, ask) }))
+  await update($, ui, u => ({ ...u, askHidden: undefined }))
+  void $.ui.open({ id: PANE, title: TITLE }).catch(() => undefined)
+}
+
+const LENS_TOOLS = ['lens_team_roster', 'lens_team_activity', 'lens_team_blocked', 'lens_review_queue', 'lens_team_stats', 'lens_ai_usage', 'lens_system_health', 'lens_cost', 'lens_tests', 'lens_topology', 'lens_errors_by_component', 'lens_slowest_routes', 'lens_get_view'] as const
+const RANGES = ['today', '7d', '30d', '90d']
+
+/** Only the arguments a Lens tool takes, each checked; anything else the model sent is dropped. */
+const lensArgs = (input: Record<string, unknown>): Record<string, unknown> => {
+  const out: Record<string, unknown> = {}
+  const text = (k: string, max: number): void => {
+    const v = input[k]
+    if (typeof v === 'string' && v.trim() !== '' && v.length <= max) out[k] = v.trim()
+  }
+  text('systemRef', 120)
+  text('environment', 40)
+  text('focus', 160)
+  text('id', 60)
+  if (typeof input['range'] === 'string' && RANGES.includes(input['range'])) out['range'] = input['range']
+  if (typeof input['groupBy'] === 'string' && ['feature', 'model', 'person'].includes(input['groupBy'])) out['groupBy'] = input['groupBy']
+  if (typeof input['person'] === 'number' && Number.isInteger(input['person']) && input['person'] > 0) out['person'] = input['person']
+
+  return out
+}
+
 type Options = Readonly<Record<string, unknown>>
 
 const keyOf = (options: Options): string => (typeof options['apiKey'] === 'string' ? options['apiKey'].trim() : '')
@@ -290,12 +324,62 @@ const checkText = async ($: EngineInterface, options: Options): Promise<string> 
   return ['PlatformNEX check', '', formatSteps(all), '', ready ? 'Ready. Open the pane with /pnx-context.' : 'Not ready yet: fix the first ✗ above, restart Claude Code, then run /pnx-context check again.'].join('\n')
 }
 
+/** Asks the gateway as the person for the model's tool, keeps the answer for the pane, and answers the model with it. */
+async function serve($: EngineInterface, cfg: Cfg | undefined, name: string, args: Record<string, unknown>): Promise<{ result: string } | { deny: string }> {
+  if (cfg === undefined) return { deny: 'PlatformNEX is not set up. Run /pnx-context setup.' }
+  try {
+    const reply = await mcpCall($, cfg, name, args)
+    await record($, `${OWN_PREFIX}${name}`, args, reply.text, reply.isError).catch(() => undefined)
+    if (reply.isError) return { deny: scrub(reply.text === '' ? 'the tool reported an error' : reply.text, 300) }
+
+    return { result: reply.text === '' ? 'No answer.' : reply.text }
+  } catch (error) {
+    return { deny: `PlatformNEX: ${failure(error)}` }
+  }
+}
+
 export const register: Register = (on, options) => {
   const cfg = readCfg(options)
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'pnx-context', description: 'Show the PlatformNEX component, health and pull requests for this repo' })
     void $.ui.open({ id: PANE, title: TITLE })
+    if (cfg !== undefined) {
+      // The model's way to ask PlatformNEX. Both are read-only; the answer is also drawn in the pane.
+      void $.tool
+        .register({
+          name: 'pnx_plan_change',
+          description:
+            "Plan a change in a PlatformNEX System, e.g. 'create a change for me in speakupnex'. Returns the steps in order, starting with a ServiceNEX ticket, plus the System's environments and approval gates. It is a plan only: nothing is created, so tell the person and let them decide. The plan also appears in the PlatformNEX pane.",
+          inputSchema: {
+            type: 'object',
+            properties: { systemRef: { type: 'string', description: "The System's ref, e.g. system:default/speakupnex" }, summary: { type: 'string', description: 'What the change is, in one sentence' } },
+            required: ['systemRef', 'summary'],
+          },
+        })
+        .catch(() => undefined)
+      void $.tool
+        .register({
+          name: 'pnx_lens',
+          description:
+            "Ask PlatformNEX Lens about a System: what the team is working on (lens_team_activity, lens_team_blocked, lens_review_queue, lens_team_stats), its health, cost, AI usage, tests or topology. Read-only. The answer also appears in the PlatformNEX pane. For 'what is my team working on' use lens_team_activity with range 7d, then lens_team_blocked.",
+          inputSchema: {
+            type: 'object',
+            properties: {
+              tool: { type: 'string', enum: [...LENS_TOOLS] },
+              systemRef: { type: 'string', description: "The System's ref, e.g. system:default/forcenex" },
+              range: { type: 'string', enum: RANGES },
+              person: { type: 'number', description: 'A userId from lens_team_roster' },
+              groupBy: { type: 'string', enum: ['feature', 'model', 'person'] },
+              environment: { type: 'string' },
+              focus: { type: 'string' },
+              id: { type: 'string', description: 'A saved view id, for lens_get_view' },
+            },
+            required: ['tool'],
+          },
+        })
+        .catch(() => undefined)
+    }
     void refresh($, cfg, true).catch(() => undefined)
     $.clock.every(TICK_MS, () => void refresh($, cfg, false).catch(() => undefined))
 
@@ -312,7 +396,28 @@ export const register: Register = (on, options) => {
     return { text: cfg === undefined ? 'PlatformNEX pane opened, but it is not set up yet. Run /pnx-context setup.' : 'PlatformNEX pane opened. If it shows an error, run /pnx-context check.' }
   })
 
-  // Notes which repository Claude's own file reads and edits touch, so the pane can follow the work.
+  // The two tools above: ask the gateway as the person and answer the model with what it said.
+  const fields = (e: unknown): Record<string, unknown> => (e !== null && typeof e === 'object' ? (e as Record<string, unknown>) : {})
+
+  on('tool.call', { tool: `${OWN_PREFIX}pnx_plan_change` }, async ($, e) => {
+    const input = fields(e)
+    const systemRef = typeof input['systemRef'] === 'string' ? input['systemRef'].trim() : ''
+    const summary = typeof input['summary'] === 'string' ? input['summary'].trim() : ''
+    if (systemRef === '' || summary.length < 3) return { deny: 'Both systemRef and summary are needed.' }
+
+    return serve($, cfg, 'plan_propose', { systemRef: systemRef.slice(0, 120), summary: summary.slice(0, 500) })
+  })
+
+  on('tool.call', { tool: `${OWN_PREFIX}pnx_lens` }, async ($, e) => {
+    const input = fields(e)
+    const name = typeof input['tool'] === 'string' ? input['tool'] : ''
+    if (!(LENS_TOOLS as readonly string[]).includes(name)) return { deny: `Unknown Lens tool. Use one of: ${LENS_TOOLS.join(', ')}.` }
+
+    return serve($, cfg, name, lensArgs(input))
+  })
+
+  // Notes which repository Claude's own file reads and edits touch, so the pane can follow the work; and keeps what a
+  // PlatformNEX tool answered (from any MCP config) so the pane can draw it. The call itself is never changed.
   on('tool.call', async ($, e, next) => {
     try {
       const path = (e as unknown as { file_path?: unknown }).file_path
@@ -324,13 +429,26 @@ export const register: Register = (on, options) => {
       // Never let the pane get in the way of a tool call.
     }
 
-    return next(e)
+    const result = await next(e)
+
+    try {
+      const tool = (e as unknown as { tool?: unknown }).tool
+      if (isPnxTool(tool) && !tool.startsWith(OWN_PREFIX)) {
+        const out = result as unknown as { result?: unknown; isError?: unknown }
+        await record($, tool, e, textOf(out?.result), out?.isError === true)
+      }
+    } catch {
+      // Same: a failure here is the pane's, not the call's.
+    }
+
+    return result
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button, Link } = $.ui.resolve(e)
     const d = await read($, data)
     const u = await read($, ui)
+    const heard = await read($, asks)
     const columns = Math.max(24, e.props.bodyColumns ?? 40)
     // Room inside a panel: the border and one space of padding on each side.
     const inner = Math.max(16, columns - 4)
@@ -385,6 +503,45 @@ export const register: Register = (on, options) => {
     const pages = Math.max(1, Math.ceil(ordered.length / PAGE_SIZE))
     const page = Math.min(Math.max(0, u.page ?? 0), pages - 1)
     const pageRepos = ordered.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE)
+
+    const newest: Ask | undefined = heard.items.find(a => a.id !== u.askHidden)
+    const askPanel = (k: Ask) => {
+      if (k.kind === 'plan') {
+        const steps = k.steps ?? []
+
+        return panel(
+          k.title,
+          'claude',
+          <Text dimColor>{k.risk === undefined ? '' : `risk: ${k.risk}`}</Text>,
+          <Box flexDirection="column">
+            <Text dimColor>{cap(k.note ?? 'Plan only. Nothing has been created.', inner)}</Text>
+            {steps.map((s, i) => (
+              <Box flexDirection="column" key={`ask-step-${i}`}>
+                <Text bold={i === 0} color={i === 0 ? 'claude' : undefined}>{cap(`${i === 0 ? '▸' : ' '} ${i + 1} ○ ${s.label}`, inner)}</Text>
+                {i === 0 && <Text dimColor>{cap(`      ${s.detail}`, inner)}</Text>}
+              </Box>
+            ))}
+            {(k.evidence ?? []).length > 0 && <Text> </Text>}
+            {(k.evidence ?? []).map(ev => (
+              <Text dimColor>{cap(`${ev.k}  ${ev.v}`, inner)}</Text>
+            ))}
+          </Box>,
+        )
+      }
+
+      return panel(
+        k.title,
+        k.kind === 'team' ? 'suggestion' : 'inactive',
+        <Text dimColor>{ago(k.at, now)}</Text>,
+        <Box flexDirection="column">
+          {k.note !== undefined && <Text dimColor>{cap(k.note, inner * 2)}</Text>}
+          {k.facts.map(f => (
+            <Text>{cap(`• ${f}`, inner * 2)}</Text>
+          ))}
+          {(k.blocks ?? []).length > 0 && <Text dimColor>{cap(`views: ${(k.blocks ?? []).map(b => b.title).join(' · ')}`, inner * 2)}</Text>}
+        </Box>,
+      )
+    }
 
     const strip = (values: string[], tone: (v: string) => string) => (
       <Box flexDirection="row">
@@ -528,6 +685,20 @@ export const register: Register = (on, options) => {
         </Box>
         {d.status === 'error' && d.error !== undefined && <Text color="error">{cap(d.error, columns * 2)}</Text>}
         {rule}
+
+        {/* The newest answer from a PlatformNEX tool: a plan, the team's work, or the facts it returned. */}
+        {newest !== undefined && (
+          <Box flexDirection="column">
+            <Box flexDirection="row" justifyContent="space-between">
+              <Text bold>{cap(`ASK · ${newest.asked ?? newest.system ?? newest.title.toLowerCase()}`, Math.max(12, columns - 6))}</Text>
+              <Button key="ask-dismiss" plain hotkey="x" onPress={act(() => update($, ui, x => ({ ...x, askHidden: newest.id })))}>
+                x
+              </Button>
+            </Box>
+            {askPanel(newest)}
+            {rule}
+          </Box>
+        )}
 
         {/* Every repository found here, catalog ones first, a page at a time. Letters pick one, n and p turn the page. */}
         {d.repos.length > 1 && (
