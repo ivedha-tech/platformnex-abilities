@@ -42,14 +42,14 @@ const json = (body: unknown, status = 200) => ({ value: { status, ok: status >= 
 type Sent = { url: string; method: string; headers: Record<string, string>; body?: string }
 
 /** Stubs what sits beneath the mod: the host's network, shell and repo. Records every request. */
-const stubWorld = (on: On, sent: Sent[], opts: { releases?: unknown; created?: unknown; byRepo?: unknown; byRepoStatus?: number; tokenStatus?: number } = {}) => {
+const stubWorld = (on: On, sent: Sent[], opts: { scan?: string; releases?: unknown; created?: unknown; byRepo?: unknown; byRepoStatus?: number; tokenStatus?: number } = {}) => {
   on('command.register', () => ({ value: { command: 'pnx-context' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.status', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: '/w/gateway' }))
   on('session.repo', () => ({ value: { root: '/w/gateway', remote: 'x', internal: false, name: null } }))
-  on('process.run', () => ({ value: { exitCode: 0, stdout: SCAN, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: opts.scan ?? SCAN, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   on('http.fetch', (_, e) => {
     sent.push({ url: e.url, method: e.init?.method ?? 'GET', headers: (e.init?.headers ?? {}) as Record<string, string>, body: typeof e.init?.body === 'string' ? e.init.body : undefined })
     if (e.url.endsWith('/auth/api-key-token')) return opts.tokenStatus === undefined ? json({ success: true, data: { accessToken: 'short-lived', expiresIn: 900 } }) : json({ success: false, error: { message: 'This API key is invalid, expired or revoked.' } }, opts.tokenStatus)
@@ -288,5 +288,33 @@ test('a state an earlier version stored is declined', { options: OPTIONS }, asyn
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
 
   expect((await ui.find({ type: 'Text', text: /SET UP PLATFORMNEX|No git repository/ }))?.text).toBeDefined()
+  await ui.unmount()
+})
+
+test('a folder with many repositories lists them a page at a time, and a repository can be picked', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  const scan = Array.from({ length: 10 }, (_, i) => `/w/r${i}\thttps://github.com/ivedha-tech/r${i}.git\tmain\tabc123${i}\n`).join('')
+  stubWorld(on, sent, { scan })
+  on('session.cwd', () => ({ value: '/w/r0' }))
+
+  await $.session.start({ cwd: '/w/r0', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  expect((await ui.find({ type: 'Text', text: /REPOSITORIES/ }))?.text).toMatch(/10/)
+  // First page: eight rows, the one in view is not a button, the ninth repository is on the next page.
+  expect(await ui.find({ key: 'pick-/w/r1' })).toBeDefined()
+  expect(await ui.find({ key: 'pick-/w/r0' })).toBeUndefined()
+  expect(await ui.find({ key: 'pick-/w/r8' })).toBeUndefined()
+
+  await ui.press({ key: 'page-next' })
+  expect(await ui.find({ key: 'pick-/w/r8' })).toBeDefined()
+  expect(await ui.find({ key: 'pick-/w/r1' })).toBeUndefined()
+
+  await ui.press({ key: 'pick-/w/r8' })
+  await clock.settle()
+  expect(await ui.find({ key: 'pick-/w/r8' })).toBeUndefined()
+  expect(await ui.find({ key: 'pick-/w/r0' })).toBeDefined()
   await ui.unmount()
 })

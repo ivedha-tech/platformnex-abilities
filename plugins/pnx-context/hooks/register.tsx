@@ -42,13 +42,14 @@ const LOOKUP_RETRY_MS = 60_000
 const SCAN_MS = 10 * 60_000
 const MAX_LOOKUPS = 40
 const MAX_MATCHES = 3
+const PAGE_SIZE = 8
 
 const EMPTY_DATA: Data = { at: 0, status: 'unconfigured', repos: [] }
 const EMPTY_UI: Ui = {}
 
 // Change a tag when the stored fields change: it declines what an earlier version stored.
 const data = atom({ plugin: 'pnx-context', key: 'data' } as const, EMPTY_DATA, { shape: 'data-1' })
-const ui = atom({ plugin: 'pnx-context', key: 'ui' } as const, EMPTY_UI, { shape: 'ui-2' })
+const ui = atom({ plugin: 'pnx-context', key: 'ui' } as const, EMPTY_UI, { shape: 'ui-3' })
 
 // Every repository under the folder the session is in, one line each: folder, remote, branch, short sha.
 const SCAN =
@@ -374,11 +375,16 @@ export const register: Register = (on, options) => {
     const cwdRoot = d.repos.length === 0 ? undefined : rootContaining(await $.session.cwd(), roots)
     const activeRoot = [u.chosenRoot, cwdRoot, u.touchedRoot].find(r => r !== undefined && roots.includes(r)) ?? d.repos.find(r => r.matches.length > 0)?.root
     const active = d.repos.find(r => r.root === activeRoot)
-    const others = d.repos.filter(r => r.root !== activeRoot && r.matches.length > 0)
     const matched = d.repos.filter(r => r.matches.length > 0).length
     const shown = active === undefined ? [] : active.matches.slice(0, MAX_MATCHES)
     const current = shown.find(m => m.entityRef === u.activeEntity) ?? shown[0]
     const currentStatus = current?.health?.status ?? 'unknown'
+
+    // Catalog repositories first (the sort is stable, so the scan order holds within each group).
+    const ordered = [...d.repos].sort((a, b) => Number(b.matches.length > 0) - Number(a.matches.length > 0))
+    const pages = Math.max(1, Math.ceil(ordered.length / PAGE_SIZE))
+    const page = Math.min(Math.max(0, u.page ?? 0), pages - 1)
+    const pageRepos = ordered.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE)
 
     const strip = (values: string[], tone: (v: string) => string) => (
       <Box flexDirection="row">
@@ -523,6 +529,63 @@ export const register: Register = (on, options) => {
         {d.status === 'error' && d.error !== undefined && <Text color="error">{cap(d.error, columns * 2)}</Text>}
         {rule}
 
+        {/* Every repository found here, catalog ones first, a page at a time. Letters pick one, n and p turn the page. */}
+        {d.repos.length > 1 && (
+          <Box flexDirection="column">
+            <Box flexDirection="row" justifyContent="space-between">
+              <Text bold>REPOSITORIES · {d.repos.length}</Text>
+              {pages > 1 && (
+                <Box flexDirection="row" gap={1}>
+                  <Text dimColor>
+                    {page + 1}/{pages}
+                  </Text>
+                  <Button key="page-prev" plain hotkey="p" onPress={act(() => update($, ui, x => ({ ...x, page: Math.max(0, page - 1) })))}>
+                    ‹ p
+                  </Button>
+                  <Button key="page-next" plain hotkey="n" onPress={act(() => update($, ui, x => ({ ...x, page: Math.min(pages - 1, page + 1) })))}>
+                    n ›
+                  </Button>
+                </Box>
+              )}
+            </Box>
+            {pageRepos.map((r, i) => {
+              const isActive = r.root === activeRoot
+              const inCatalog = r.matches.length > 0
+              const dot = isActive ? healthTone(currentStatus) : undefined
+              const first = r.matches[0]
+              const label = cap(`${first?.title ?? first?.name ?? r.name}${r.matches.length > 1 ? ` +${r.matches.length - 1}` : ''}`, Math.max(8, inner - 22))
+              const where = inCatalog ? cap((first?.systemRefs[0] ?? 'no System').replace(/^system:/, ''), 16) : 'not in catalog'
+              const letter = String.fromCharCode(97 + i)
+
+              return (
+                <Box flexDirection="row" justifyContent="space-between" key={`row-${r.root}`}>
+                  {isActive ? (
+                    <Box flexDirection="row">
+                      <Text bold>{`▸ ${letter} `}</Text>
+                      <Text color={dot}>● </Text>
+                      <Text bold>{label}</Text>
+                    </Box>
+                  ) : (
+                    <Button
+                      key={`pick-${r.root}`}
+                      plain
+                      hotkey={letter}
+                      onPress={act(async () => {
+                        await update($, ui, x => ({ ...x, chosenRoot: r.root, activeEntity: undefined, pending: undefined, notice: undefined }))
+                        await refresh($, cfg, true)
+                      })}
+                    >
+                      {`  ${letter} ${inCatalog ? '●' : '○'} ${label}`}
+                    </Button>
+                  )}
+                  <Text dimColor>{where}</Text>
+                </Box>
+              )
+            })}
+            {rule}
+          </Box>
+        )}
+
         {/* One tab for each component of this repository. */}
         {shown.length > 0 && (
           <Box flexDirection="column">
@@ -591,20 +654,6 @@ export const register: Register = (on, options) => {
             {rule}
             {releasePanel(current, active)}
             {rule}
-          </Box>
-        )}
-
-        {others.length > 0 && (
-          <Box flexDirection="column">
-            <Box flexDirection="row" justifyContent="space-between">
-              <Text bold>OTHER REPOS · {others.length}</Text>
-              <Text dimColor>{others.length > 1 ? `a-${String.fromCharCode(96 + Math.min(others.length, 15))} to switch` : 'a to switch'}</Text>
-            </Box>
-            {others.slice(0, 15).map((r, i) => (
-              <Button key={`pick-${r.root}`} plain hotkey={String.fromCharCode(97 + i)} onPress={act(async () => { await update($, ui, x => ({ ...x, chosenRoot: r.root, activeEntity: undefined, pending: undefined, notice: undefined })); await refresh($, cfg, true) })}>
-                {cap(`  ${r.matches[0]?.name ?? r.name}${r.matches.length > 1 ? ` +${r.matches.length - 1}` : ''}`, columns)}
-              </Button>
-            ))}
           </Box>
         )}
       </Box>
