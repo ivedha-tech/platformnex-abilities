@@ -46,7 +46,12 @@ export const parseAsk = (tool: string, input: unknown, text: string | undefined,
     const system = typeof args?.['systemRef'] === 'string' ? scrub((args['systemRef'] as string).replace(/^system:/i, ''), 60) : undefined
     const asked = typeof args?.['summary'] === 'string' ? scrub(args['summary'], 120) : undefined
     const base = { id: `${now}-${name}`, tool: name, at: now, title: titleOf(name), system, asked }
-    if (isError || text === undefined || text.length > MAX_RAW) return { ...base, kind: 'generic', facts: [], note: isError ? 'The tool reported an error.' : 'No answer to show.' }
+    // An error says why (the server's own words, scrubbed and cut), so a tool the server doesn't have reads as that, not as an empty panel.
+    if (isError || text === undefined || text.length > MAX_RAW) {
+      const why = isError && text !== undefined && text.trim() !== '' ? scrub(text, 160) : isError ? 'The tool reported an error.' : 'No answer to show.'
+
+      return { ...base, kind: 'generic', facts: [], note: why }
+    }
 
     let body: unknown
     try {
