@@ -24,9 +24,17 @@ export type Ram = {
   samples: number[]
 }
 
+/** One agent the marketplace defines: `team` is its plugin, `name` its agent file. */
+export type RosterEntry = {
+  team: string
+  name: string
+}
+
 export type Snapshot = {
   now: number
   agents: AgentRow[]
+  /** Every agent available to spawn, so idle ones are listed too. */
+  roster: RosterEntry[]
   main: { tokens?: number; window: number }
   ram: Ram
 }
