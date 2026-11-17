@@ -29,7 +29,20 @@ The portal address has a default, so only the key is needed. To use another envi
 | `/pnx-context setup` | print the commands to save your key |
 | `/pnx-context check` | test the address, the key and the lookup route, and say what to fix. It never shows the key |
 
-In the pane (when it has focus): `1`, `2`, `3` switch component tabs, `r` refreshes, `a` to `o` switch to another repo found under the folder you are in.
+In the pane (when it has focus): `1`, `2`, `3` switch component tabs, `r` refreshes, `a` to `h` pick a repo from the list, `p` and `n` turn its page, `x` dismisses an ASK answer.
+
+## Ask PlatformNEX from Claude Code
+
+With the key saved, Claude gets two read-only tools. Ask in plain words and the answer is also drawn at the top of the pane (`ASK`), `x` dismisses it:
+
+| You ask | Tool | The pane shows |
+| --- | --- | --- |
+| "create a change for me in speakupnex" | `pnx_plan_change` | a plan: **create a ticket in ServiceNEX first**, then draft the change, approval, a linked release, a check; the System's environments and approval gates |
+| "what is my team working on" | `pnx_lens` (`lens_team_activity`, `lens_team_blocked`, ...) | the facts Lens returned and its view titles |
+
+A plan is **a plan only**: nothing is created in PlatformNEX or ServiceNEX. The pane also draws the answer of any `platformnex` MCP tool you have configured yourself. It keeps the last five answers, cut down and capped, and never a key, token or the raw response.
+
+Needs the gateway's `plan_propose` tool (platformnex-gateway PR #649) for plans, and the `lens` flag for Lens.
 
 ## If it shows an error
 
@@ -41,4 +54,4 @@ Run `/pnx-context check`. The usual causes:
 
 ## What it calls
 
-Everything is read-only except one draft release, and it uses only your own key. See the pull request that added it for the full list. It never calls deploy, rollback, refresh or any live cost route.
+Everything is read-only except one draft release, and it uses only your own key. The two ask tools call the gateway's MCP proxy (`/api/catalog/mcp-proxy`), which offers read-only tools only, with a short token made from your key. See the pull request that added it for the full list. It never calls deploy, rollback, refresh or any live cost route.

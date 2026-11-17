@@ -98,6 +98,40 @@ export async function call($: EngineInterface, cfg: Cfg, method: 'GET' | 'POST',
   throw new ApiFailure('the API key was not accepted', 401)
 }
 
+/** An MCP Streamable HTTP reply is JSON, or one server-sent event whose `data:` line is the JSON. */
+const mcpBody = (text: string): unknown => {
+  const trimmed = text.trim()
+  const line = trimmed.startsWith('{') ? trimmed : trimmed.split('\n').reverse().find(l => l.startsWith('data:'))?.slice(5).trim()
+  try {
+    return line === undefined ? undefined : JSON.parse(line)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * One read-only tool call through the gateway's MCP proxy, as the person (their key, traded for a short token).
+ * Returns the tool's answer text. The proxy only offers read-only tools; this never calls anything else.
+ */
+export async function mcpCall($: EngineInterface, cfg: Cfg, name: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }> {
+  const body = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const reply = await send($, cfg, 'POST', '/api/catalog/mcp-proxy', { Authorization: `Bearer ${await bearer($, cfg)}`, Accept: 'application/json, text/event-stream' }, body)
+    if (reply.status === 401 && attempt === 0) {
+      forgetToken()
+      continue
+    }
+    if (!reply.ok) throw new ApiFailure(reasonFor(reply.status), reply.status)
+    const parsed = mcpBody(reply.text) as { result?: { content?: { type?: string; text?: string }[]; isError?: boolean }; error?: { message?: unknown } } | undefined
+    if (parsed === undefined) throw new ApiFailure('answer not understood')
+    if (parsed.error !== undefined) throw new ApiFailure(typeof parsed.error.message === 'string' ? cap(parsed.error.message, 120) : 'the tool was refused')
+    const text = (parsed.result?.content ?? []).map(c => (c.type === 'text' && typeof c.text === 'string' ? c.text : '')).join('')
+
+    return { text, isError: parsed.result?.isError === true }
+  }
+  throw new ApiFailure('the API key was not accepted', 401)
+}
+
 export function byRepo($: EngineInterface, cfg: Cfg, repoUrl: string) {
   return call($, cfg, 'GET', `/api/catalog/catalog/entities/by-repo?repoUrl=${encodeURIComponent(repoUrl)}`)
 }

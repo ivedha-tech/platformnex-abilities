@@ -60,11 +60,37 @@ export type Data = {
   repos: RepoView[]
 }
 
+/** One answer from a PlatformNEX tool, cut down to what the pane draws. Never holds a key, token or the raw response. */
+export type Ask = {
+  id: string
+  /** The tool's own name, e.g. plan_propose, lens_team_activity. */
+  tool: string
+  at: number
+  kind: 'plan' | 'team' | 'generic'
+  title: string
+  /** The System the question was about, without the system: prefix. */
+  system?: string
+  /** What was asked, for a plan. */
+  asked?: string
+  facts: string[]
+  blocks?: { title: string; kind: string }[]
+  /** Plan only. */
+  risk?: string
+  executed?: boolean
+  steps?: { label: string; detail: string }[]
+  evidence?: { k: string; v: string }[]
+  note?: string
+}
+
+export type Asks = { items: Ask[] }
+
 export type Ui = {
   /** The repository the person chose; empty means follow the session. */
   chosenRoot?: string
   /** The repository the session's own tool calls touched last. */
   touchedRoot?: string
+  /** The id of the answer the person dismissed with x. */
+  askHidden?: string
   /** Which page of the repository list is showing, from 0. */
   page?: number
   /** The component tab the person picked, by entity ref; empty means the first. */
@@ -77,6 +103,6 @@ export type Ui = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'pnx-context': { data: Shaped<Data>; ui: Shaped<Ui> }
+    'pnx-context': { data: Shaped<Data>; ui: Shaped<Ui>; asks: Shaped<Asks> }
   }
 }
