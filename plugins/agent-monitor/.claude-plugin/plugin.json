@@ -1,0 +1,6 @@
+{
+  "name": "agent-monitor",
+  "version": "0.1.0",
+  "description": "A pane showing each agent's progress and context use, plus the RAM this session and the machine are using. Opt-in; runs ps and vm_stat every 3 seconds.",
+  "types": "./types/index.d.ts"
+}
