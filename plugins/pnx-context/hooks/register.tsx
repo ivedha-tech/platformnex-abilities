@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { ApiFailure, byRepo, checkAccess, createDraftRelease, mcpCall, openReleases, snapshots, systemHealth, type Cfg, type CheckStep } from './api'
+import { ApiFailure, byRepo, call, checkAccess, createDraftRelease, mcpCall, openReleases, snapshots, systemHealth, type Cfg, type CheckStep } from './api'
 import {
   ago,
   baseName,
@@ -31,7 +31,9 @@ import {
   type ScannedRepo,
 } from './lib'
 import { OWN_PREFIX, handoffUrl, parseAsk, pickActiveMatch, pushAsk, scrub } from './skills'
-import type { Ask, Asks, Data, Match, RepoView, Ui } from '../types'
+import { ENVIRONMENTS, FIND_CLAUDE, PLUGIN_ID, apiKeysUrl, baseOf, configureInput, environmentOf, extractKey, type EnvironmentId } from './setup'
+import { ALREADY_RUNNING_EXIT, FIND_DEVICE, FIND_NEEDS, FIND_PNX, MIN_PNX, MISSING_RETRY_MS, RETRY_MS, catalogUrlOf, devCycleSteps, endedNote, isAtLeast, isTakingJobs, lineNote, parseDeviceId, parseFind, parseNeeds } from './worker'
+import type { Ask, Asks, ClaudeCode, Data, Match, RepoView, Ui } from '../types'
 
 const PANE = 'pnx-context'
 const TITLE = 'PlatformNEX'
@@ -53,6 +55,8 @@ const data = atom({ plugin: 'pnx-context', key: 'data' } as const, EMPTY_DATA, {
 const ui = atom({ plugin: 'pnx-context', key: 'ui' } as const, EMPTY_UI, { shape: 'ui-5' })
 // The change plans Claude asked for lately, cut down to what the pane draws.
 const asks = atom({ plugin: 'pnx-context', key: 'asks' } as const, EMPTY_ASKS, { shape: 'asks-2' })
+// Whether this machine's Claude Code takes dev-cycle jobs now (one line in the pane), and why the last try stopped (for the check).
+const claudeCode = atom({ plugin: 'pnx-context', key: 'claudeCode' } as const, { status: 'connecting' } as ClaudeCode, { shape: 'claude-code-1' })
 
 // Every repository under the folder the session is in, one line each: folder, remote, branch, short sha.
 const SCAN =
@@ -76,6 +80,87 @@ const readCfg = (options: Readonly<Record<string, unknown>>): Cfg | undefined =>
 }
 
 const failure = (error: unknown): string => (error instanceof ApiFailure ? error.reason : 'something went wrong')
+
+// The worker this module started: ending its loop stops the child (pnx). A reload starts over, and so does the worker.
+let stopWorker: (() => void) | undefined
+let isWorkerBusy = false
+let isStopping = false
+// The device id the running worker took jobs as: what leaving Claude Code marks offline.
+let workerDevice: string | undefined
+let nextWorkerTry = 0
+// The key saved from the pane this session: counts at once, before (or without) the plugin reloading with it. In
+// memory only, never in state; a restart reads the saved settings instead.
+let liveCfg: Cfg | undefined
+
+// The worker runs quietly: the pane shows one Dev cycles line; what it does goes to the debug log (claude --debug).
+const logWorker = ($: EngineInterface, text: string) => $.ui.log(`PlatformNEX dev cycles: ${text}`, { to: 'debug' })
+const setClaudeCode = ($: EngineInterface, status: ClaudeCode['status'], note?: string) => update($, claudeCode, () => ({ status, note }))
+
+/**
+ * Starts `pnx claude run --allow-codegen --auto-link` with the plugin's key and address, unless one already runs here
+ * or it is too soon to try again. The loop is the child's life; it ends with the child or when this session ends.
+ */
+const startWorker = async ($: EngineInterface, cfg: Cfg): Promise<void> => {
+  if (isWorkerBusy || isStopping) return
+  const now = await $.clock.now()
+  if (now < nextWorkerTry) return
+  isWorkerBusy = true
+  try {
+    const found = await $.process
+      .run(['node', '-e', FIND_PNX], { timeoutMs: 20_000 })
+      .then(r => parseFind(r.stdout))
+      .catch((): { cli?: string; version?: string } => ({}))
+    // pnx is installed and kept current by the pnx-fast-dev Ability; until it is, this waits and tries again.
+    if (found.cli === undefined || !isAtLeast(found.version)) {
+      nextWorkerTry = now + MISSING_RETRY_MS
+      const why = found.cli === undefined ? 'pnx is not installed' : `pnx ${found.version} is too old (needs ${MIN_PNX}+)`
+      logWorker($, why)
+      await setClaudeCode($, 'offline', why)
+
+      return
+    }
+    const child = $.process.spawn({ argv: ['node', found.cli, 'claude', 'run', '--allow-codegen', '--auto-link'], env: { PNX_CATALOG_URL: catalogUrlOf(cfg.base), PNX_API_KEY: cfg.key } })
+    const pieces = child[Symbol.asyncIterator]()
+    stopWorker = () => void pieces.return?.({ code: null, signal: null })
+    let lastError: string | undefined
+    for (;;) {
+      const piece = await pieces.next()
+      if (piece.done === true) {
+        const ended = piece.value as { code?: number | null } | undefined
+        stopWorker = undefined
+        workerDevice = undefined
+        nextWorkerTry = (await $.clock.now()) + RETRY_MS
+        if (!isStopping) {
+          logWorker($, endedNote(ended?.code ?? null, lastError))
+          // Another Claude Code window on this machine runs it: this machine is still online.
+          await setClaudeCode($, ended?.code === ALREADY_RUNNING_EXIT ? 'online' : 'offline', lastError ?? `stopped (exit ${ended?.code ?? 'signal'})`)
+        }
+
+        return
+      }
+      const note = lineNote(piece.value.text)
+      if (piece.value.stream === 'stderr' && note !== undefined) lastError = note
+      if (isTakingJobs(piece.value.text)) {
+        logWorker($, 'online, taking PlatformNEX jobs')
+        await setClaudeCode($, 'online')
+        // pnx has saved its machine link by now (it links before taking jobs).
+        workerDevice = await $.process
+          .run(['node', '-e', FIND_DEVICE], { timeoutMs: 10_000 })
+          .then(r => parseDeviceId(r.stdout, catalogUrlOf(cfg.base)))
+          .catch(() => undefined)
+      }
+    }
+  } catch (error) {
+    stopWorker = undefined
+    workerDevice = undefined
+    nextWorkerTry = (await $.clock.now()) + RETRY_MS
+    const why = `could not start pnx (${error instanceof Error ? lineNote(error.message) ?? 'unknown error' : 'unknown error'})`
+    logWorker($, why)
+    await setClaudeCode($, 'offline', why).catch(() => undefined)
+  } finally {
+    isWorkerBusy = false
+  }
+}
 
 const discover = async ($: EngineInterface, force: boolean): Promise<{ cwd: string; repos: ScannedRepo[] }> => {
   const cwd = await $.session.cwd()
@@ -199,6 +284,51 @@ const refresh = async ($: EngineInterface, cfg: Cfg | undefined, force: boolean)
   }
 }
 
+const setupNote = ($: EngineInterface, text: string, tone: 'error' | 'success' | 'info', busy = false) => update($, ui, u => ({ ...u, setupBusy: busy, setupNote: { text, tone } }))
+
+/**
+ * Setup from the pane: checks the pasted key with the chosen PlatformNEX, then saves it and the address the way
+ * `claude plugin configure --values-stdin` does (the key only on stdin). The key is never kept in state, shown or logged.
+ */
+const saveKey = async ($: EngineInterface, pasted: string, env: EnvironmentId): Promise<void> => {
+  const key = extractKey(pasted)
+  if (key === undefined) {
+    await setupNote($, "That doesn't look like a PlatformNEX key (it starts with pnx_). Copy it again from the portal.", 'error')
+
+    return
+  }
+  const base = baseOf(env)
+  const label = ENVIRONMENTS.find(e => e.id === env)?.label ?? env
+  await setupNote($, `Checking the key with ${label}…`, 'info', true)
+  try {
+    const accepted = (await checkAccess($, { base, key })).find(s => s.label === 'key accepted')
+    if (accepted?.ok !== true) {
+      await setupNote($, `${label} didn't accept this key (${accepted?.detail ?? 'could not check'}). Create a new key there and paste it again.`, 'error')
+
+      return
+    }
+    const found = await $.process.run(['node', '-e', FIND_CLAUDE], { timeoutMs: 10_000 }).catch(() => undefined)
+    const claude = found?.stdout.trim() || 'claude'
+    const saved = await $.process.run([claude, 'plugin', 'configure', PLUGIN_ID, '--values-stdin'], { stdin: configureInput(key, base), timeoutMs: 30_000 })
+    if (saved.exitCode !== 0) {
+      await setupNote($, `The key works but could not be saved: ${lineNote(saved.stderr || saved.stdout) ?? 'claude plugin configure failed'}`, 'error')
+
+      return
+    }
+    // Switch the pane to the connected view now (a restart reads the saved settings); the dev-cycle connection starts on the next tick.
+    liveCfg = { base, key }
+    await setupNote($, `Connected to ${label}.`, 'success')
+    void refresh($, liveCfg, true).catch(() => undefined)
+  } catch (error) {
+    await setupNote($, `Could not finish setup: ${error instanceof Error ? lineNote(error.message) ?? 'unknown error' : 'unknown error'}`, 'error')
+  }
+}
+
+/** Starts the worker when it should run here and isn't running yet (startWorker decides when to try again). */
+const keepWorker = ($: EngineInterface, workerCfg: Cfg | undefined): void => {
+  if (workerCfg !== undefined) void startWorker($, workerCfg).catch(() => undefined)
+}
+
 const portalLink = (cfg: Cfg, entityRef: string, sessionId: string): string | undefined => {
   const hit = /^component:([^/\s]+)\/([^/\s]+)$/i.exec(entityRef)
 
@@ -302,8 +432,32 @@ const checkText = async ($: EngineInterface, options: Options): Promise<string> 
   const rest = stop || cfg === undefined ? [{ label: 'key accepted', ok: undefined, detail: 'skipped until the steps above pass' } as CheckStep, { label: 'lookup route', ok: undefined, detail: 'skipped' } as CheckStep] : await checkAccess($, cfg)
   const all = [...steps, ...rest]
   const ready = all.every(s => s.ok === true)
+  const summary = ['PlatformNEX check', '', formatSteps(all), '', ready ? 'Ready. Open the pane with /pnx-context.' : 'Not ready yet: fix the first ✗ above, restart Claude Code, then run /pnx-context check again.']
 
-  return ['PlatformNEX check', '', formatSteps(all), '', ready ? 'Ready. Open the pane with /pnx-context.' : 'Not ready yet: fix the first ✗ above, restart Claude Code, then run /pnx-context check again.'].join('\n')
+  return (cfg === undefined || !ready ? summary : [...summary, '', ...(await devCycleCheck($, cfg, options['devCycles'] === 'off'))]).join('\n')
+}
+
+/** The check's Dev cycles part: what the worker needs and what is missing. When it is offline, it also tries again now. */
+const devCycleCheck = async ($: EngineInterface, cfg: Cfg, isOff: boolean): Promise<string[]> => {
+  const cc = await read($, claudeCode)
+  if (isOff || cc.status === 'online') return ['Dev cycles', formatSteps(devCycleSteps({ isOff, status: cc.status, pnx: {} }))]
+  const [needs, pnx] = await Promise.all([
+    $.process.run(['node', '-e', FIND_NEEDS], { timeoutMs: 30_000 }).then(r => parseNeeds(r.stdout)).catch(() => undefined),
+    $.process.run(['node', '-e', FIND_PNX], { timeoutMs: 20_000 }).then(r => parseFind(r.stdout)).catch((): { cli?: string; version?: string } => ({})),
+  ])
+  // Pressing check after installing what was missing should not wait for the next try.
+  nextWorkerTry = 0
+  keepWorker($, cfg)
+
+  return ['Dev cycles', formatSteps(devCycleSteps({ isOff, status: cc.status, note: cc.note, needs, pnx })), '  · trying to connect again now']
+}
+
+/** The pane's Check button: the same steps as /pnx-context check, kept for the pane to show (never the key). */
+const runCheck = async ($: EngineInterface, options: Options): Promise<void> => {
+  await update($, ui, u => ({ ...u, check: { lines: ['Checking…'], isReady: false } }))
+  const text = await checkText($, options).catch(() => 'Could not run the check.')
+  const lines = text.split('\n').slice(2).filter(l => l.trim() !== '')
+  await update($, ui, u => ({ ...u, check: { lines, isReady: text.includes('Ready.') } }))
 }
 
 /** The Agent mode link for a plan, naming the component the pane has identified. Never throws. */
@@ -340,12 +494,33 @@ async function serve($: EngineInterface, cfg: Cfg | undefined, name: string, arg
 }
 
 export const register: Register = (on, options) => {
-  const cfg = readCfg(options)
+  const fromOptions = readCfg(options)
+  // The saved settings, or the key saved from the pane this session (before the plugin reloads with it).
+  const activeCfg = (): Cfg | undefined => fromOptions ?? liveCfg
+  // The worker runs once the key and address are set, unless the person turned it off.
+  const activeWorkerCfg = (): Cfg | undefined => (options['devCycles'] === 'off' ? undefined : activeCfg())
+  // What the check reads: the saved settings, or the key saved from the pane this session.
+  const checkOptions = (): Options => (fromOptions === undefined && liveCfg !== undefined ? { ...options, apiKey: liveCfg.key, baseUrl: liveCfg.base } : options)
+
+  // Leaving Claude Code stops the worker and tells PlatformNEX at once (a /clear keeps the session's process, and it).
+  // One request from here, not a pnx command: it fits session.end's short budget, and on Windows the stopped worker
+  // can't say it itself.
+  on('session.end', async ($, e, next) => {
+    const workerCfg = activeWorkerCfg()
+    if (e.reason !== 'clear' && stopWorker !== undefined && workerCfg !== undefined) {
+      isStopping = true
+      const device = workerDevice
+      stopWorker()
+      if (device !== undefined) await call($, workerCfg, 'POST', `/api/catalog/devices/${encodeURIComponent(device)}/offline`, {}).catch(() => undefined)
+    }
+
+    return next(e)
+  })
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'pnx-context', description: 'Show the PlatformNEX component, health and releases for this repo' })
     void $.ui.open({ id: PANE, title: TITLE })
-    if (cfg !== undefined) {
+    if (fromOptions !== undefined) {
       // The model's way to ask PlatformNEX for a change plan. Read-only; the plan is also drawn in the pane.
       void $.tool
         .register({
@@ -361,16 +536,21 @@ export const register: Register = (on, options) => {
         })
         .catch(() => undefined)
     }
-    void refresh($, cfg, true).catch(() => undefined)
-    $.clock.every(TICK_MS, () => void refresh($, cfg, false).catch(() => undefined))
+    void refresh($, activeCfg(), true).catch(() => undefined)
+    keepWorker($, activeWorkerCfg())
+    $.clock.every(TICK_MS, () => {
+      void refresh($, activeCfg(), false).catch(() => undefined)
+      keepWorker($, activeWorkerCfg())
+    })
 
     return next(e)
   })
 
   on('command.run', { command: 'pnx-context' }, async ($, e) => {
     const word = e.args.trim()
+    const cfg = activeCfg()
     if (word === 'setup') return { text: setupText(options) }
-    if (word === 'check') return { text: await checkText($, options) }
+    if (word === 'check') return { text: await checkText($, checkOptions()) }
     await $.ui.open({ id: PANE, title: TITLE })
     void refresh($, cfg, e.args.trim() === 'refresh').catch(() => undefined)
 
@@ -380,7 +560,8 @@ export const register: Register = (on, options) => {
   // Tells the model when to use the plan tool, once configured.
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
-    if (cfg === undefined) return composed
+    // Only where the plan tool was registered (configured when the session started).
+    if (fromOptions === undefined) return composed
 
     return { sections: [...composed.sections, { id: 'pnx-context-routing', text: ROUTING, scope: 'session' as const }] }
   })
@@ -393,7 +574,7 @@ export const register: Register = (on, options) => {
     const summary = typeof input['summary'] === 'string' ? input['summary'].trim() : ''
     if (systemRef === '' || summary.length < 3) return { deny: 'Both systemRef and summary are needed.' }
 
-    return serve($, cfg, 'plan_propose', { systemRef: systemRef.slice(0, 120), summary: summary.slice(0, 500) })
+    return serve($, activeCfg(), 'plan_propose', { systemRef: systemRef.slice(0, 120), summary: summary.slice(0, 500) })
   })
 
   // Notes which repository Claude's own file reads and edits touch, so the pane can follow the work. The call itself is never changed.
@@ -412,10 +593,13 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button, Link } = $.ui.resolve(e)
+    const { Box, Text, Button, Link, Input } = $.ui.resolve(e)
+    // The saved settings, or the key just saved from this pane.
+    const cfg = activeCfg()
     const d = await read($, data)
     const u = await read($, ui)
     const heard = await read($, asks)
+    const cc = await read($, claudeCode)
     const columns = Math.max(24, e.props.bodyColumns ?? 40)
     // Room inside a panel: the border and one space of padding on each side.
     const inner = Math.max(16, columns - 4)
@@ -424,6 +608,13 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     const act = (run: () => Promise<unknown>) => () => void run().catch(() => undefined)
     const rule = <Text dimColor>{'─'.repeat(Math.max(10, columns))}</Text>
+    // The Check's lines, coloured by their mark (✓, ✗, or dim for · and ->).
+    const checkLines = (lines: string[]) =>
+      lines.map((line, n) => (
+        <Text key={`check-${n}`} color={line.trim().startsWith('✗') ? 'error' : line.trim().startsWith('✓') ? 'success' : undefined} dimColor={line.trim().startsWith('·') || line.trim().startsWith('->')}>
+          {cap(line, inner * 2)}
+        </Text>
+      ))
 
     // One bordered panel: title and a short summary on the first row, both in the panel's colour.
     const panel = (title: string, accent: string, right: JSX.Element | undefined, body: JSX.Element) => (
@@ -439,19 +630,47 @@ export const register: Register = (on, options) => {
     )
 
     if (d.status === 'unconfigured' || cfg === undefined) {
-      const set = Number(safeBaseUrl(urlOf(options)) !== undefined) + Number(keyOf(options) !== '')
+      // The environment picked here, else the saved address's, else production.
+      const env: EnvironmentId = u.setupEnv ?? environmentOf(safeBaseUrl(urlOf(options))) ?? 'prod'
+      const note = u.setupNote
 
       return panel(
         'SET UP PLATFORMNEX',
         'warning',
-        <Text dimColor>{set} of 2 set</Text>,
+        undefined,
         <Box flexDirection="column">
-          <Text>1  Create an API key in the portal</Text>
-          <Text dimColor>   user menu, API keys</Text>
-          <Text>2  Save it: run /pnx-context setup</Text>
-          <Text dimColor>   and copy the command it prints</Text>
-          <Text>3  Restart Claude Code, then run</Text>
-          <Text dimColor>   /pnx-context check</Text>
+          <Box flexDirection="row" gap={1} flexWrap="wrap">
+            <Text dimColor>Environment:</Text>
+            {ENVIRONMENTS.map(e => (
+              <Button key={`env-${e.id}`} {...(e.id === env ? {} : { plain: true as const })} onPress={act(() => update($, ui, x => ({ ...x, setupEnv: e.id, setupNote: undefined })))}>
+                {`${e.id === env ? '●' : '○'} ${e.label}`}
+              </Button>
+            ))}
+          </Box>
+          <Text> </Text>
+          <Text>1  Create an API key</Text>
+          <Link href={apiKeysUrl(baseOf(env))}>{`   ↗ open API keys (${ENVIRONMENTS.find(e => e.id === env)?.label ?? env})`}</Link>
+          <Text>2  Paste it here and press Enter</Text>
+          <Input
+            key="setup-key"
+            label="   "
+            placeholder="pnx_…"
+            value=""
+            submitLabel={u.setupBusy === true ? 'checking…' : 'connect'}
+            onSubmit={value => {
+              if (u.setupBusy !== true) void saveKey($, value, env).catch(() => undefined)
+            }}
+          />
+          {note !== undefined && <Text color={note.tone === 'info' ? undefined : note.tone}>{cap(note.text, inner * 3)}</Text>}
+          <Box flexDirection="row" gap={1}>
+            <Text>3  Check the connection</Text>
+            <Button key="setup-check" hotkey="k" onPress={act(() => runCheck($, checkOptions()))}>
+              ✓ check
+            </Button>
+          </Box>
+          {u.check !== undefined && <Box flexDirection="column">{checkLines(u.check.lines)}</Box>}
+          <Text> </Text>
+          <Text dimColor>The key is checked, saved for this plugin only and never sent to the chat.</Text>
         </Box>,
       )
     }
@@ -604,6 +823,9 @@ export const register: Register = (on, options) => {
             <Button key="refresh" plain hotkey="r" onPress={act(() => refresh($, cfg, true))}>
               ⟳
             </Button>
+            <Button key="check" plain hotkey="k" onPress={act(() => runCheck($, checkOptions()))}>
+              {' ✓ check (k)'}
+            </Button>
           </Box>
           <Box flexDirection="row" gap={2}>
             <Box flexDirection="row">
@@ -617,7 +839,32 @@ export const register: Register = (on, options) => {
           </Box>
         </Box>
         {d.status === 'error' && d.error !== undefined && <Text color="error">{cap(d.error, columns * 2)}</Text>}
+        {options['devCycles'] !== 'off' && (
+          <Text color={cc.status === 'online' ? 'success' : undefined} dimColor={cc.status !== 'online'}>
+            {cap(
+              cc.status === 'online'
+                ? '● Dev cycles: your Claude Code is online'
+                : cc.status === 'offline'
+                  ? '○ Dev cycles: your Claude Code is offline · press k to see why'
+                  : '○ Dev cycles: connecting your Claude Code…',
+              columns * 2,
+            )}
+          </Text>
+        )}
         {rule}
+        {u.check !== undefined && (
+          <Box flexDirection="column">
+            {panel(
+              'CHECK',
+              u.check.isReady ? 'success' : 'warning',
+              <Button key="check-dismiss" plain hotkey="q" onPress={act(() => update($, ui, x => ({ ...x, check: undefined })))}>
+                q close
+              </Button>,
+              <Box flexDirection="column">{checkLines(u.check.lines)}</Box>,
+            )}
+            {rule}
+          </Box>
+        )}
 
         {/* The newest change plan Claude asked PlatformNEX for (or why that failed), with a link to Agent mode. */}
         {newest !== undefined && (

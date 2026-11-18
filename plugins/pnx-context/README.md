@@ -6,6 +6,10 @@ A Claude Code mod that shows, beside your conversation, which PlatformNEX compon
 
 You need a personal API key. It acts as you, so keep it private.
 
+**In the pane** (the usual way, on any OS): pick the environment (Production or dit1), open **API keys** from the link, create a key, then paste it into the pane's field and press Enter. The pane checks the key with that PlatformNEX, saves it for this plugin only (never in the chat) and switches to the component view at once. **✓ check** (`k`) shows the connection's state in the pane, in the setup card and after it.
+
+**From a terminal** instead:
+
 1. **Create the key** in the PlatformNEX portal: user menu, **API keys**. It starts with `pnx_`. Do not paste it into chat, an editor or a file.
 2. **Save it.** In Claude Code run `/pnx-context setup`; it prints the exact command to copy. In your own terminal that is:
 
@@ -20,6 +24,18 @@ You need a personal API key. It acts as you, so keep it private.
 
 The portal address has a default, so only the key is needed. To use another environment, add `"baseUrl": "https://..."` to the same JSON (https only, no path).
 
+## Dev cycles on your Claude Code
+
+Once the key is saved, the pane also keeps this machine's Claude Code connected to PlatformNEX whenever Claude Code is open (it runs `pnx claude run --allow-codegen --auto-link` in the background). That is what lets the development cycles you start use your own Claude Code: drafting the plan, Start coding, Continue and Run again. There is nothing else to run: it links this machine the first time, uses the key and address saved here (not the ones in pnx's own `~/.config/pnx/config.json`; pnx keeps its machine link and its one-per-machine lock in that folder), and stops when you leave Claude Code, telling PlatformNEX at once.
+
+- **It needs** Node.js 20 or newer, Claude Code signed in, `git` and `gh` signed in for coding jobs, and pnx 0.1.18 or newer, which the pnx-fast-dev Ability installs and keeps current.
+- **The pane shows one line**: `● Dev cycles: your Claude Code is online`, or `offline · press k to see why`.
+- **When it is offline, ✓ check (`k`) shows why**: which of those is missing (for pnx, also why pnx-fast-dev could not install it) and the last error, each ✗ with what to do. It also tries to connect again at once, so after installing what was missing there is no wait. More detail goes to the debug log (`claude --debug`).
+- **One per machine.** A second Claude Code window shows it online too; if the window running it closes, another open one takes over within a minute.
+- **To turn it off**, set the `devCycles` option to `off` (`/plugin configure pnx-context@platformnex-abilities`): the pane only.
+
+A coding job may push a `platformnex/` branch and open a draft pull request with your own git and gh sign-ins; it never merges and never deploys.
+
 ## Commands
 
 | Command | Does |
@@ -29,7 +45,7 @@ The portal address has a default, so only the key is needed. To use another envi
 | `/pnx-context setup` | print the commands to save your key |
 | `/pnx-context check` | test the address, the key and the lookup route, and say what to fix. It never shows the key |
 
-In the pane (when it has focus): `1`, `2`, `3` switch component tabs, `r` refreshes, `a` to `h` pick a repo from the list, `p` and `n` turn its page, `x` dismisses a plan, `m` shows it in full or short.
+In the pane (when it has focus): `1`, `2`, `3` switch component tabs, `r` refreshes, `k` runs the check and shows its result in the pane (`q` closes it), `a` to `h` pick a repo from the list, `p` and `n` turn its page, `x` dismisses a plan, `m` shows it in full or short.
 
 ## Ask PlatformNEX for a change plan
 
