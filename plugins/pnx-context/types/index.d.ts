@@ -72,6 +72,12 @@ export type Ask = {
 
 export type Asks = { items: Ask[] }
 
+/** One step of a Check: ok is undefined for one skipped or only informative. */
+export type CheckLine = { label: string; ok?: boolean; detail: string; fix?: string }
+
+/** A Check's steps for one thing: the key, the lookup route or dev cycles. */
+export type CheckGroup = { name: string; steps: CheckLine[] }
+
 export type Ui = {
   /** The repository the person chose; empty means follow the session. */
   chosenRoot?: string
@@ -95,8 +101,15 @@ export type Ui = {
   setupNote?: { text: string; tone: 'error' | 'info' }
   /** The steps of connecting that went well (key accepted, saved, connected), shown with a ✓. */
   setupDone?: string[]
-  /** The last Check's result lines (as /pnx-context check prints them, never the key), until dismissed. */
-  check?: { lines: string[]; isReady: boolean }
+  /**
+   * The last Check, until dismissed: its steps in groups (key, lookup, dev cycles), never the key. isChecking while it
+   * runs, note when it could not run.
+   */
+  check?: { groups: CheckGroup[]; isReady: boolean; isChecking?: boolean; note?: string }
+  /** True while the CONNECTION panel is open (s): switch environment or key, or disconnect. */
+  connOpen?: boolean
+  /** True while Disconnect waits for the person's yes. */
+  confirmDisconnect?: boolean
 }
 
 /** Whether this machine's Claude Code takes PlatformNEX's dev-cycle jobs now (the worker the plugin runs), and why the last try stopped. */

@@ -20,7 +20,8 @@ const AGENT = 'pnx-context-mod/0.1.0'
 const TIMEOUT_MS = 12_000
 const MAX_BODY = 2_000_000
 
-let token: { value: string; expiresAt: number } | undefined
+// The token and the connection (address and key) it was issued for: another connection never gets it. Memory only.
+let token: { value: string; expiresAt: number; base: string; key: string } | undefined
 
 /** Why a call failed when PlatformNEX refused the key (wrong, expired or revoked). */
 export const KEY_REFUSED = 'the API key was not accepted'
@@ -59,15 +60,20 @@ async function send($: EngineInterface, cfg: Cfg, method: string, path: string, 
 
 /** Trades the personal key for a 15-minute token, kept in memory only. */
 async function bearer($: EngineInterface, cfg: Cfg): Promise<string> {
-  if (token !== undefined && token.expiresAt - Date.now() > 60_000) return token.value
+  if (token !== undefined && token.base === cfg.base && token.key === cfg.key && token.expiresAt - Date.now() > 60_000) return token.value
   const reply = await send($, cfg, 'POST', '/api/catalog/auth/api-key-token', { Authorization: `ApiKey ${cfg.key}` })
   if (!reply.ok) throw new ApiFailure(reasonFor(reply.status), reply.status)
   const data = unwrap(reply.text) as { accessToken?: unknown; expiresIn?: unknown } | undefined
   if (typeof data?.accessToken !== 'string' || data.accessToken === '') throw new ApiFailure('sign-in answer not understood')
   const seconds = typeof data.expiresIn === 'number' && data.expiresIn > 0 ? data.expiresIn : 900
-  token = { value: data.accessToken, expiresAt: Date.now() + seconds * 1000 }
+  token = { value: data.accessToken, expiresAt: Date.now() + seconds * 1000, base: cfg.base, key: cfg.key }
 
   return token.value
+}
+
+/** Signs in with the key (or reuses this connection's token): throws ApiFailure(KEY_REFUSED) when the key is refused. */
+export async function signIn($: EngineInterface, cfg: Cfg): Promise<void> {
+  await bearer($, cfg)
 }
 
 export const forgetToken = (): void => {
