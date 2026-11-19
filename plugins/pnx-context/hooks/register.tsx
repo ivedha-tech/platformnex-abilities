@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { ApiFailure, KEY_REFUSED, byRepo, call, checkAccess, createDraftRelease, mcpCall, openReleases, snapshots, systemHealth, type Cfg, type CheckStep } from './api'
+import { ApiFailure, KEY_REFUSED, byRepo, call, checkAccess, createDraftRelease, forgetToken, mcpCall, openReleases, signIn, snapshots, systemHealth, type Cfg, type CheckStep } from './api'
 import {
   ago,
   baseName,
@@ -33,7 +33,7 @@ import {
 import { OWN_PREFIX, handoffUrl, parseAsk, pickActiveMatch, pushAsk, scrub } from './skills'
 import { ENVIRONMENTS, FIND_CLAUDE, PLUGIN_ID, apiKeysUrl, baseOf, configureInput, environmentOf, extractKey, type EnvironmentId } from './setup'
 import { ALREADY_RUNNING_EXIT, FIND_DEVICE, FIND_NEEDS, FIND_PNX, MIN_PNX, MISSING_RETRY_MS, RETRY_MS, catalogUrlOf, devCycleSteps, endedNote, isAtLeast, isTakingJobs, lineNote, parseDeviceId, parseFind, parseNeeds, sessionEndAction } from './worker'
-import type { Ask, Asks, ClaudeCode, Data, Match, RepoView, Ui } from '../types'
+import type { Ask, Asks, CheckGroup, ClaudeCode, Data, Match, RepoView, Ui } from '../types'
 
 const PANE = 'pnx-context'
 const TITLE = 'PlatformNEX'
@@ -45,6 +45,10 @@ const SCAN_MS = 10 * 60_000
 const MAX_LOOKUPS = 40
 const MAX_MATCHES = 3
 const PAGE_SIZE = 8
+// Width of the label column in the header's two status rows (✓ PlatformNEX, ● Dev cycles), so their values line up.
+const STATUS_LABEL = 16
+// Width of the header's action buttons (⟳, ✓ check), mirrored by an empty column so the title sits in the middle.
+const HEADER_ACTIONS = 20
 
 const EMPTY_DATA: Data = { at: 0, status: 'unconfigured', repos: [] }
 const EMPTY_UI: Ui = {}
@@ -52,7 +56,7 @@ const EMPTY_ASKS: Asks = { items: [] }
 
 // Change a tag when the stored fields change: it declines what an earlier version stored.
 const data = atom({ plugin: 'pnx-context', key: 'data' } as const, EMPTY_DATA, { shape: 'data-2' })
-const ui = atom({ plugin: 'pnx-context', key: 'ui' } as const, EMPTY_UI, { shape: 'ui-5' })
+const ui = atom({ plugin: 'pnx-context', key: 'ui' } as const, EMPTY_UI, { shape: 'ui-6' })
 // The change plans Claude asked for lately, cut down to what the pane draws.
 const asks = atom({ plugin: 'pnx-context', key: 'asks' } as const, EMPTY_ASKS, { shape: 'asks-2' })
 // Whether this machine's Claude Code takes dev-cycle jobs now (one line in the pane), and why the last try stopped (for the check).
@@ -71,12 +75,22 @@ let scan: { cwd: string; at: number; repos: ScannedRepo[] } | undefined
 const lookups = new Map<string, { at: number; matches?: ParsedMatch[]; failed?: string }>()
 const details = new Map<string, { at: number; match: Match }>()
 let isBusy = false
+// Counts the connections dropped (a switch or Disconnect): a refresh started under an earlier one writes nothing, so the
+// old environment's repositories, details and status never land after the new one's.
+let connection = 0
+// A forced refresh asked for while another ran (connect, Disconnect, ⟳): it runs as soon as that one ends, unless the
+// connection was dropped meanwhile (that drop's own refresh comes after it).
+let queued: { cfg: Cfg | undefined; at: number } | undefined
+// PlatformNEX refused the key in use at the last refresh: the pane asks for a new one, so dev cycles don't start with
+// it and Claude isn't pointed at the plan tool. Refreshes still sign in, so a key that works again counts again.
+let isRefused = false
 
 const readCfg = (options: Readonly<Record<string, unknown>>): Cfg | undefined => {
   const base = safeBaseUrl(options['baseUrl'])
   const key = typeof options['apiKey'] === 'string' ? options['apiKey'].trim() : ''
 
-  return base === undefined || key === '' ? undefined : { base, key }
+  // A key that is not a PlatformNEX key counts as not set: the pane asks for one instead of claiming a connection.
+  return base === undefined || !key.startsWith('pnx_') ? undefined : { base, key }
 }
 
 const failure = (error: unknown): string => (error instanceof ApiFailure ? error.reason : 'something went wrong')
@@ -91,6 +105,13 @@ let nextWorkerTry = 0
 // The key saved from the pane this session: counts at once, before (or without) the plugin reloading with it. In
 // memory only, never in state; a restart reads the saved settings instead.
 let liveCfg: Cfg | undefined
+// True after Disconnect in the pane: the saved settings stop counting for this session until a key is connected again.
+let isDisconnected = false
+// Set while the pane switches or drops the connection: the stopped worker may start again at once, on the new settings.
+let isRestarting = false
+// What is typed in the terminal's key field, for its connect button: memory only (never state, a file or a log), and
+// emptied once a key is saved, the CONNECTION panel closes or Disconnect runs.
+let draftKey = ''
 
 // The worker runs quietly: the pane shows one Dev cycles line; what it does goes to the debug log (claude --debug).
 const logWorker = ($: EngineInterface, text: string) => $.ui.log(`PlatformNEX dev cycles: ${text}`, { to: 'debug' })
@@ -105,11 +126,15 @@ const startWorker = async ($: EngineInterface, cfg: Cfg): Promise<void> => {
   const now = await $.clock.now()
   if (now < nextWorkerTry) return
   isWorkerBusy = true
+  const started = connection
   try {
     const found = await $.process
       .run(['node', '-e', FIND_PNX], { timeoutMs: 20_000 })
       .then(r => parseFind(r.stdout))
       .catch((): { cli?: string; version?: string } => ({}))
+    // The connection was dropped (a switch or Disconnect) while pnx was looked up, before there was a worker to stop:
+    // never start it with the old key. The next tick starts it for the connection in use, if any.
+    if (started !== connection) return
     // pnx is installed and kept current by the pnx-fast-dev Ability; until it is, this waits and tries again.
     if (found.cli === undefined || !isAtLeast(found.version)) {
       nextWorkerTry = now + MISSING_RETRY_MS
@@ -129,8 +154,10 @@ const startWorker = async ($: EngineInterface, cfg: Cfg): Promise<void> => {
         const ended = piece.value as { code?: number | null } | undefined
         stopWorker = undefined
         workerDevice = undefined
-        nextWorkerTry = (await $.clock.now()) + RETRY_MS
-        if (!isStopping) {
+        const wasRestarting = isRestarting
+        isRestarting = false
+        nextWorkerTry = wasRestarting ? 0 : (await $.clock.now()) + RETRY_MS
+        if (!isStopping && !wasRestarting) {
           logWorker($, endedNote(ended?.code ?? null, lastError))
           // Another Claude Code window on this machine runs it: this machine is still online.
           await setClaudeCode($, ended?.code === ALREADY_RUNNING_EXIT ? 'online' : 'offline', lastError ?? `stopped (exit ${ended?.code ?? 'signal'})`)
@@ -176,7 +203,7 @@ const discover = async ($: EngineInterface, force: boolean): Promise<{ cwd: stri
 }
 
 /** Which Components a remote belongs to, remembered for a while. A failure is remembered only briefly. */
-const lookup = async ($: EngineInterface, cfg: Cfg, remote: string, force: boolean): Promise<{ matches?: ParsedMatch[]; failed?: string }> => {
+const lookup = async ($: EngineInterface, cfg: Cfg, remote: string, force: boolean, started: number): Promise<{ matches?: ParsedMatch[]; failed?: string }> => {
   const key = normalizeRepoUrl(remote)
   const now = await $.clock.now()
   const known = lookups.get(key)
@@ -184,18 +211,18 @@ const lookup = async ($: EngineInterface, cfg: Cfg, remote: string, force: boole
   try {
     const reply = await byRepo($, cfg, cleanRemote(remote))
     const entry = { at: now, matches: parseByRepo(reply.data) }
-    lookups.set(key, entry)
+    if (started === connection) lookups.set(key, entry)
 
     return entry
   } catch (error) {
     const entry = { at: now, failed: error instanceof ApiFailure && error.status === 404 ? 'this PlatformNEX does not have the repo lookup yet' : failure(error) }
-    lookups.set(key, entry)
+    if (started === connection) lookups.set(key, entry)
 
     return entry
   }
 }
 
-const loadDetail = async ($: EngineInterface, cfg: Cfg, match: ParsedMatch, force: boolean): Promise<Match> => {
+const loadDetail = async ($: EngineInterface, cfg: Cfg, match: ParsedMatch, force: boolean, started: number): Promise<Match> => {
   const now = await $.clock.now()
   const known = details.get(match.entityRef)
   if (!force && known !== undefined && now - known.at < DETAIL_MS) return known.match
@@ -229,14 +256,20 @@ const loadDetail = async ($: EngineInterface, cfg: Cfg, match: ParsedMatch, forc
   else notes.push(`releases: ${failure(releases.reason)}`)
 
   out.detailNote = notes.length === 0 ? undefined : cap(notes.join('; '), 160)
-  details.set(match.entityRef, { at: now, match: out })
+  if (started === connection) details.set(match.entityRef, { at: now, match: out })
 
   return out
 }
 
 const refresh = async ($: EngineInterface, cfg: Cfg | undefined, force: boolean): Promise<void> => {
-  if (isBusy) return
+  if (isBusy) {
+    // A tick can wait for the next one; a forced refresh (a new connection, say) must not be lost.
+    if (force) queued = { cfg, at: connection }
+
+    return
+  }
   isBusy = true
+  const started = connection
   try {
     const now = await $.clock.now()
     if (cfg === undefined) {
@@ -250,16 +283,23 @@ const refresh = async ($: EngineInterface, cfg: Cfg | undefined, force: boolean)
     const state = await read($, ui)
     const views: RepoView[] = []
     let failed: string | undefined
+    let hasAsked = false
     for (const repo of scanned.slice(0, MAX_LOOKUPS)) {
       const base = { root: repo.root, name: baseName(repo.root), remote: repo.remote, branch: repo.branch, head: repo.head }
       if (repo.remote === undefined || !isRepoUrl(repo.remote)) {
         views.push({ ...base, lookup: 'none', matches: [] })
         continue
       }
-      const found = await lookup($, cfg, repo.remote, force)
+      hasAsked = true
+      const found = await lookup($, cfg, repo.remote, force, started)
       if (found.failed !== undefined) failed = found.failed
       views.push({ ...base, lookup: found.failed !== undefined ? 'error' : (found.matches ?? []).length > 0 ? 'found' : 'none', matches: (found.matches ?? []) as Match[] })
     }
+    // With nothing to look up the key would go untried: sign in (one request, then the token is reused) so the pane
+    // never says Connected for a key PlatformNEX refuses.
+    if (!hasAsked) await signIn($, cfg).catch((error: unknown) => {
+      failed = failure(error)
+    })
 
     // Only the repository on screen is read in detail; the rest wait until the person picks them.
     const roots = views.map(v => v.root)
@@ -267,20 +307,26 @@ const refresh = async ($: EngineInterface, cfg: Cfg | undefined, force: boolean)
     const filled = await Promise.all(
       views.map(async v =>
         v.root === activeRoot && v.matches.length > 0
-          ? { ...v, matches: await Promise.all(v.matches.slice(0, MAX_MATCHES).map(m => loadDetail($, cfg, m as ParsedMatch, force))) }
+          ? { ...v, matches: await Promise.all(v.matches.slice(0, MAX_MATCHES).map(m => loadDetail($, cfg, m as ParsedMatch, force, started))) }
           : v,
       ),
     )
+    // The connection changed while this ran: what it read belongs to the old one.
+    if (started !== connection) return
 
     const result: Data = { at: now, status: failed !== undefined && filled.every(v => v.lookup !== 'found') ? 'error' : 'ok', error: failed, repos: filled }
+    isRefused = result.status === 'error' && result.error === KEY_REFUSED
     await update($, data, () => result)
 
     const active = filled.find(v => v.root === activeRoot)?.matches[0]
     $.ui.status(active === undefined ? undefined : `${active.name} · ${healthLabel(active.health?.status ?? 'unknown')}`)
   } catch (error) {
-    await update($, data, (before): Data => ({ ...before, status: 'error', error: failure(error) })).catch(() => undefined)
+    if (started === connection) await update($, data, (before): Data => ({ ...before, status: 'error', error: failure(error) })).catch(() => undefined)
   } finally {
     isBusy = false
+    const next = queued
+    queued = undefined
+    if (next !== undefined && next.at === connection) void refresh($, next.cfg, true)
   }
 }
 
@@ -292,7 +338,7 @@ const setupDone = ($: EngineInterface, text: string) => update($, ui, u => ({ ..
  * Setup from the pane: checks the pasted key with the chosen PlatformNEX, then saves it and the address the way
  * `claude plugin configure --values-stdin` does (the key only on stdin). The key is never kept in state, shown or logged.
  */
-const saveKey = async ($: EngineInterface, pasted: string, env: EnvironmentId): Promise<boolean> => {
+const saveKey = async ($: EngineInterface, pasted: string, env: EnvironmentId, previous?: Cfg): Promise<boolean> => {
   await update($, ui, u => ({ ...u, setupDone: [] }))
   const key = extractKey(pasted)
   if (key === undefined) {
@@ -322,8 +368,13 @@ const saveKey = async ($: EngineInterface, pasted: string, env: EnvironmentId): 
     }
     // Everything counts at once, with no restart: the pane switches to the connected view, Claude gets the plan tool
     // from the next prompt, and the check that follows starts the dev-cycle connection. A restart reads the saved settings.
-    await update($, ui, u => ({ ...u, setupBusy: false, setupNote: undefined, setupDone: [...(u.setupDone ?? []), 'Saved for this plugin', 'Connected, opening the component view…'] }))
-    liveCfg = { base, key }
+    // Switching from a connection: the old one's dev cycles stop and its data goes before the new one is drawn.
+    const next = { base, key }
+    if (previous !== undefined) await dropConnection($, previous, next)
+    await update($, ui, u => ({ ...u, setupBusy: false, setupNote: undefined, connOpen: false, confirmDisconnect: false, check: undefined, setupDone: [...(u.setupDone ?? []), 'Saved for this plugin', 'Connected, opening the component view…'] }))
+    liveCfg = next
+    isDisconnected = false
+    draftKey = ''
     void refresh($, liveCfg, true).catch(() => undefined)
     void registerPlanTool($)
 
@@ -333,6 +384,66 @@ const saveKey = async ($: EngineInterface, pasted: string, env: EnvironmentId): 
 
     return false
   }
+}
+
+/**
+ * Ends what a connection left behind: stops the dev-cycle worker (telling PlatformNEX this machine is offline, as
+ * leaving Claude Code does) and forgets the repositories and details read with it, so nothing of it stays on screen.
+ */
+const dropConnection = async ($: EngineInterface, cfg: Cfg, next: Cfg | undefined): Promise<void> => {
+  if (stopWorker !== undefined) {
+    const device = workerDevice
+    isRestarting = true
+    stopWorker()
+    if (device !== undefined) await call($, cfg, 'POST', `/api/catalog/devices/${encodeURIComponent(device)}/offline`, {}).catch(() => undefined)
+  }
+  // The switch itself, in one step with no wait between: work started before it sees the counter move, and work
+  // started after it already uses the next connection (none, for Disconnect), never the old key under the new count.
+  connection += 1
+  liveCfg = next
+  isDisconnected = next === undefined
+  nextWorkerTry = 0
+  isRefused = false
+  forgetToken()
+  lookups.clear()
+  details.clear()
+  // Nothing read yet, not "not set up": a switch stays in the connected view until its refresh lands (Disconnect's own
+  // refresh, with no connection, then shows setup).
+  const now = await $.clock.now()
+  await update($, data, (): Data => ({ at: now, status: 'ok', repos: [] }))
+  await update($, asks, (): Asks => ({ ...EMPTY_ASKS }))
+  await setClaudeCode($, 'connecting')
+  $.ui.status(undefined)
+}
+
+/**
+ * The pane's Disconnect: drops the connection, stops using the key in this session and asks the plugin settings to
+ * forget it. If they can't, the note says the saved key comes back when Claude Code restarts.
+ */
+const disconnect = async ($: EngineInterface, cfg: Cfg | undefined): Promise<void> => {
+  if (cfg !== undefined) await dropConnection($, cfg, undefined)
+  liveCfg = undefined
+  isDisconnected = true
+  draftKey = ''
+  const found = await $.process.run(['node', '-e', FIND_CLAUDE], { timeoutMs: 10_000 }).catch(() => undefined)
+  const claude = found?.stdout.trim() || 'claude'
+  const cleared = await $.process.run([claude, 'plugin', 'configure', PLUGIN_ID, '--values-stdin'], { stdin: JSON.stringify({ apiKey: '' }), timeoutMs: 30_000 }).catch(() => undefined)
+  await update($, ui, u => ({
+    ...u,
+    connOpen: false,
+    confirmDisconnect: false,
+    check: undefined,
+    pending: undefined,
+    notice: undefined,
+    setupBusy: false,
+    setupDone: undefined,
+    setupEnv: undefined,
+    setupNote: {
+      tone: 'info' as const,
+      text: cleared?.exitCode === 0 ? 'Disconnected. Paste a key to connect again.' : 'Disconnected for this session. The saved key connects again when Claude Code restarts.',
+    },
+  }))
+  await refresh($, undefined, true)
 }
 
 /** Starts the worker when it should run here and isn't running yet (startWorker decides when to try again). */
@@ -348,6 +459,7 @@ const portalLink = (cfg: Cfg, entityRef: string, sessionId: string): string | un
 
 /** The one write: a DRAFT release session. If one is already open for that environment, it is reused. */
 const confirmDraft = async ($: EngineInterface, cfg: Cfg, pending: NonNullable<Ui['pending']>): Promise<void> => {
+  const started = connection
   try {
     const open = parseReleases((await openReleases($, cfg, pending.entityRef)).data)
     const existing = open.find(r => r.environment === pending.environmentName)
@@ -370,7 +482,8 @@ const confirmDraft = async ($: EngineInterface, cfg: Cfg, pending: NonNullable<U
   } catch (error) {
     await update($, ui, u => ({ ...u, pending: undefined, notice: { text: `Could not open a draft release: ${failure(error)}` } }))
   }
-  void refresh($, cfg, true).catch(() => undefined)
+  // Not with a connection dropped while the draft was opened: that drop's own refresh shows the new one.
+  if (started === connection) void refresh($, cfg, true).catch(() => undefined)
 }
 
 
@@ -451,6 +564,17 @@ const formatSteps = (steps: CheckStep[]): string =>
 
 /** `/pnx-context check`: each step in order, with what to do about the first one that fails. The key is never shown. */
 const checkText = async ($: EngineInterface, options: Options): Promise<string> => {
+  const r = await checkResult($, options)
+  const all = [...r.key, ...r.lookup]
+  const summary = ['PlatformNEX check', '', formatSteps(all), '', r.isReady ? 'Ready. Open the pane with /pnx-context.' : 'Not ready yet: fix the first ✗ above, restart Claude Code, then run /pnx-context check again.']
+
+  return (r.dev === undefined ? summary : [...summary, '', 'Dev cycles', formatSteps(r.dev), ...(r.isRetrying ? ['  · connecting now'] : [])]).join('\n')
+}
+
+/** The check's steps in three groups (the key, the lookup route, dev cycles), for the text above and the pane's CHECK. */
+type CheckResult = { key: CheckStep[]; lookup: CheckStep[]; dev?: CheckStep[]; isReady: boolean; isRetrying: boolean }
+
+const checkResult = async ($: EngineInterface, options: Options): Promise<CheckResult> => {
   const url = urlOf(options)
   const key = keyOf(options)
   const base = safeBaseUrl(url)
@@ -464,33 +588,46 @@ const checkText = async ($: EngineInterface, options: Options): Promise<string> 
   const stop = steps.some(s => s.ok === false)
   const rest = stop || cfg === undefined ? [{ label: 'key accepted', ok: undefined, detail: 'skipped until the steps above pass' } as CheckStep, { label: 'lookup route', ok: undefined, detail: 'skipped' } as CheckStep] : await checkAccess($, cfg)
   const all = [...steps, ...rest]
-  const ready = all.every(s => s.ok === true)
-  const summary = ['PlatformNEX check', '', formatSteps(all), '', ready ? 'Ready. Open the pane with /pnx-context.' : 'Not ready yet: fix the first ✗ above, restart Claude Code, then run /pnx-context check again.']
+  const isReady = all.every(s => s.ok === true)
+  const keySteps = [...steps, ...rest.filter(s => s.label !== 'lookup route')]
+  const lookup = rest.filter(s => s.label === 'lookup route')
+  if (cfg === undefined || !isReady) return { key: keySteps, lookup, isReady, isRetrying: false }
+  const dev = await devCycleCheck($, cfg, options['devCycles'] === 'off')
 
-  return (cfg === undefined || !ready ? summary : [...summary, '', ...(await devCycleCheck($, cfg, options['devCycles'] === 'off'))]).join('\n')
+  return { key: keySteps, lookup, dev: dev.steps, isReady, isRetrying: dev.isRetrying }
 }
 
 /** The check's Dev cycles part: what the worker needs and what is missing. When it is offline, it also tries again now. */
-const devCycleCheck = async ($: EngineInterface, cfg: Cfg, isOff: boolean): Promise<string[]> => {
+const devCycleCheck = async ($: EngineInterface, cfg: Cfg, isOff: boolean): Promise<{ steps: CheckStep[]; isRetrying: boolean }> => {
+  const started = connection
   const cc = await read($, claudeCode)
-  if (isOff || cc.status === 'online') return ['Dev cycles', formatSteps(devCycleSteps({ isOff, status: cc.status, pnx: {} }))]
+  if (isOff || cc.status === 'online') return { steps: devCycleSteps({ isOff, status: cc.status, pnx: {} }), isRetrying: false }
   const [needs, pnx] = await Promise.all([
     $.process.run(['node', '-e', FIND_NEEDS], { timeoutMs: 30_000 }).then(r => parseNeeds(r.stdout)).catch(() => undefined),
     $.process.run(['node', '-e', FIND_PNX], { timeoutMs: 20_000 }).then(r => parseFind(r.stdout)).catch((): { cli?: string; version?: string } => ({})),
   ])
-  // Pressing check after installing what was missing should not wait for the next try.
-  nextWorkerTry = 0
-  keepWorker($, cfg)
+  // Pressing check after installing what was missing should not wait for the next try; not with a connection that
+  // was dropped while it looked.
+  if (started === connection) {
+    nextWorkerTry = 0
+    keepWorker($, cfg)
+  }
 
-  return ['Dev cycles', formatSteps(devCycleSteps({ isOff, status: cc.status, note: cc.note, needs, pnx })), '  · connecting now']
+  return { steps: devCycleSteps({ isOff, status: cc.status, note: cc.note, needs, pnx }), isRetrying: true }
 }
 
 /** The pane's Check button: the same steps as /pnx-context check, kept for the pane to show (never the key). */
 const runCheck = async ($: EngineInterface, options: Options): Promise<void> => {
-  await update($, ui, u => ({ ...u, check: { lines: ['Checking…'], isReady: false } }))
-  const text = await checkText($, options).catch(() => 'Could not run the check.')
-  const lines = text.split('\n').slice(2).filter(l => l.trim() !== '')
-  await update($, ui, u => ({ ...u, check: { lines, isReady: text.includes('Ready.') } }))
+  const started = connection
+  await update($, ui, u => ({ ...u, check: { groups: [], isReady: false, isChecking: true } }))
+  try {
+    const r = await checkResult($, options)
+    const groups = [{ name: 'key', steps: r.key }, { name: 'lookup', steps: r.lookup }, ...(r.dev === undefined ? [] : [{ name: 'dev cycles', steps: r.dev }])]
+    // A check of a connection dropped meanwhile is not this one's: the pane shows none rather than that.
+    await update($, ui, u => ({ ...u, check: started === connection ? { groups, isReady: r.isReady } : undefined }))
+  } catch {
+    await update($, ui, u => ({ ...u, check: started === connection ? { groups: [], isReady: false, note: 'Could not run the check.' } : undefined }))
+  }
 }
 
 /** The Agent mode link for a plan, naming the component the pane has identified. Never throws. */
@@ -528,12 +665,13 @@ async function serve($: EngineInterface, cfg: Cfg | undefined, name: string, arg
 
 export const register: Register = (on, options) => {
   const fromOptions = readCfg(options)
-  // The saved settings, or the key saved from the pane this session (before the plugin reloads with it).
-  const activeCfg = (): Cfg | undefined => fromOptions ?? liveCfg
+  // The key connected from the pane this session (it wins: it may be a switch away from the saved one), else the saved
+  // settings; nothing after Disconnect.
+  const activeCfg = (): Cfg | undefined => (isDisconnected ? undefined : liveCfg ?? fromOptions)
   // The worker runs once the key and address are set, unless the person turned it off.
-  const activeWorkerCfg = (): Cfg | undefined => (options['devCycles'] === 'off' ? undefined : activeCfg())
-  // What the check reads: the saved settings, or the key saved from the pane this session.
-  const checkOptions = (): Options => (fromOptions === undefined && liveCfg !== undefined ? { ...options, apiKey: liveCfg.key, baseUrl: liveCfg.base } : options)
+  const activeWorkerCfg = (): Cfg | undefined => (options['devCycles'] === 'off' || isRefused ? undefined : activeCfg())
+  // What the check reads: the same connection the pane uses.
+  const checkOptions = (): Options => (liveCfg !== undefined ? { ...options, apiKey: liveCfg.key, baseUrl: liveCfg.base } : isDisconnected ? { ...options, apiKey: '' } : options)
 
   // Leaving Claude Code stops the worker and tells PlatformNEX at once (/clear and /resume keep Claude Code, and it).
   // One request from here, not a pnx command: it fits session.end's short budget, and on Windows the stopped worker
@@ -584,8 +722,8 @@ export const register: Register = (on, options) => {
   // Tells the model when to use the plan tool, once configured.
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
-    // Only once Claude has the plan tool.
-    if (!hasPlanTool) return composed
+    // Only once Claude has the plan tool, and not after Disconnect or while the key is refused.
+    if (!hasPlanTool || activeCfg() === undefined || isRefused) return composed
 
     return { sections: [...composed.sections, { id: 'pnx-context-routing', text: ROUTING, scope: 'session' as const }] }
   })
@@ -618,6 +756,11 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button, Link, Input } = $.ui.resolve(e)
+    // The terminal draws a Button's hotkey itself (`k: check`) and a link's address under its label; elsewhere neither
+    // is drawn, so the hotkey goes in the label and a link keeps a short label.
+    const isTerminal = e.surface === 'terminal'
+    const hint = (label: string, key: string): string => (isTerminal ? label : `${label} (${key})`)
+    const lead = (key: string, label: string): string => (isTerminal ? label : `${key} ${label}`)
     // The saved settings, or the key just saved from this pane.
     const cfg = activeCfg()
     const d = await read($, data)
@@ -632,13 +775,59 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     const act = (run: () => Promise<unknown>) => () => void run().catch(() => undefined)
     const rule = <Text dimColor>{'─'.repeat(Math.max(10, columns))}</Text>
-    // The Check's lines, coloured by their mark (✓, ✗, or dim for · and ->).
-    const checkLines = (lines: string[]) =>
-      lines.map((line, n) => (
-        <Text key={`check-${n}`} color={line.trim().startsWith('✗') ? 'error' : line.trim().startsWith('✓') ? 'success' : undefined} dimColor={line.trim().startsWith('·') || line.trim().startsWith('->')}>
-          {cap(line, inner * 2)}
-        </Text>
-      ))
+    // The Check: one summary line (✓ key  ✓ lookup  ✗ dev cycles), then only what failed, each with its fix. The full
+    // step-by-step list stays in /pnx-context check.
+    const groupMark = (g: CheckGroup): '✓' | '✗' | '·' => (g.steps.some(s => s.ok === false) ? '✗' : g.steps.length > 0 && g.steps.every(s => s.ok === true) ? '✓' : '·')
+    const checkState = (c: NonNullable<Ui['check']>): { text: string; tone: string } =>
+      c.isChecking === true
+        ? { text: 'checking…', tone: 'warning' }
+        : c.note !== undefined || !c.isReady || c.groups.some(g => groupMark(g) === '✗')
+          ? { text: '✗ not ready', tone: 'warning' }
+          : { text: '✓ ready', tone: 'success' }
+    const checkBody = (c: NonNullable<Ui['check']>) => (
+      <Box flexDirection="column">
+        {c.note !== undefined && <Text color="error">{cap(`✗ ${c.note}`, inner)}</Text>}
+        {c.groups.length > 0 && (
+          <Box flexDirection="row" gap={3} flexWrap="wrap">
+            {c.groups.map(g => {
+              const mark = groupMark(g)
+
+              return (
+                <Text key={`check-group-${g.name}`} color={mark === '✓' ? 'success' : mark === '✗' ? 'error' : undefined} dimColor={mark === '·'}>
+                  {`${mark} ${g.name}`}
+                </Text>
+              )
+            })}
+          </Box>
+        )}
+        {c.groups
+          .filter(g => groupMark(g) === '✗')
+          .flatMap(g =>
+            g.steps.flatMap((s, n) =>
+              s.ok === false
+                ? [
+                    <Text key={`check-fail-${g.name}-${n}`} color="error">
+                      {cap(`✗ ${s.label} · ${s.detail}`, inner * 2)}
+                    </Text>,
+                    ...(s.fix === undefined
+                      ? []
+                      : [
+                          <Text key={`check-fix-${g.name}-${n}`} dimColor>
+                            {cap(`  → ${s.fix}`, inner * 2)}
+                          </Text>,
+                        ]),
+                  ]
+                : s.label === 'last try'
+                  ? [
+                      <Text key={`check-note-${g.name}-${n}`} dimColor>
+                        {cap(`  last try: ${s.detail}`, inner * 2)}
+                      </Text>,
+                    ]
+                  : [],
+            ),
+          )}
+      </Box>
+    )
 
     // One bordered panel: title and a short summary on the first row, both in the panel's colour.
     const panel = (title: string, accent: string, right: JSX.Element | undefined, body: JSX.Element) => (
@@ -653,15 +842,20 @@ export const register: Register = (on, options) => {
       </Box>
     )
 
-    if (d.status === 'unconfigured' || cfg === undefined) {
-      // The environment picked here, else the saved address's, else production.
-      const env: EnvironmentId = u.setupEnv ?? environmentOf(safeBaseUrl(urlOf(options))) ?? 'prod'
-      const note = u.setupNote
+    // Pick an environment, open its API keys page, paste a key and connect: the first setup, and a switch from the
+    // connection in use (`previous`), which stays as it is unless the new key is accepted and saved.
+    const setupForm = (env: EnvironmentId, previous: Cfg | undefined, why?: string) => {
+      // What the person did here last wins; else why the saved key does not connect.
+      const note = u.setupNote ?? (why === undefined ? undefined : { text: why, tone: 'error' as const })
+      // Enter in the field and the connect button both land here; once connected the check runs by itself. draftKey is
+      // kept: after a failed try the field still shows the key, so connect can be pressed again.
+      const connect = (value: string) => {
+        if (u.setupBusy === true || value.trim() === '') return
+        void saveKey($, value, env, previous).then(isSaved => (isSaved ? runCheck($, checkOptions()) : undefined)).catch(() => undefined)
+      }
+      const connectLabel = u.setupBusy === true ? 'checking…' : 'connect'
 
-      return panel(
-        'SET UP PLATFORMNEX',
-        'warning',
-        undefined,
+      return (
         <Box flexDirection="column">
           <Box flexDirection="row" gap={1} flexWrap="wrap">
             <Text dimColor>Environment:</Text>
@@ -673,19 +867,52 @@ export const register: Register = (on, options) => {
           </Box>
           <Text> </Text>
           <Text>1  Create an API key</Text>
-          <Link href={apiKeysUrl(baseOf(env))}>{`   ↗ open API keys (${ENVIRONMENTS.find(e => e.id === env)?.label ?? env})`}</Link>
+          <Box flexDirection="row">
+            <Text>{'   '}</Text>
+            {isTerminal ? (
+              // The address once, dim so it reads as secondary. A Link can't be dimmed, so it is plain text here: most
+              // terminals (VS Code's, Windows Terminal) still make an address clickable themselves.
+              <Text dimColor>{apiKeysUrl(baseOf(env))}</Text>
+            ) : (
+              <Link href={apiKeysUrl(baseOf(env))}>{`↗ open API keys (${ENVIRONMENTS.find(e => e.id === env)?.label ?? env})`}</Link>
+            )}
+          </Box>
+          <Text> </Text>
           <Text>2  Paste it here and press connect</Text>
-          <Input
-            key="setup-key"
-            label="   "
-            placeholder="pnx_…"
-            value=""
-            submitLabel={u.setupBusy === true ? 'checking…' : 'connect'}
-            onSubmit={value => {
-              // Once connected, the check runs by itself and its result shows in the connected view.
-              if (u.setupBusy !== true) void saveKey($, value, env).then(isSaved => (isSaved ? runCheck($, checkOptions()) : undefined)).catch(() => undefined)
-            }}
-          />
+          {isTerminal ? (
+            // The terminal draws a bare line for a field and no button for its submit: a box around it, and a real
+            // connect button (it inverts under the pointer) beside it.
+            <Box flexDirection="row" alignItems="center">
+              {/* The label outside the box, so only the key is inside it. The field has no label of its own: even a blank
+                  one is drawn with a colon. */}
+              <Text>{'   API key  '}</Text>
+              <Box borderStyle="round" paddingX={1}>
+                <Input
+                  key="setup-key"
+                  placeholder="pnx_…"
+                  value=""
+                  submitLabel={connectLabel}
+                  onInput={value => {
+                    draftKey = value
+                  }}
+                  onSubmit={value => connect(value)}
+                />
+              </Box>
+              <Text> </Text>
+              <Button key="setup-connect" variant="primary" onPress={() => connect(draftKey)}>
+                {connectLabel}
+              </Button>
+            </Box>
+          ) : (
+            <Input
+              key="setup-key"
+              label="   API key"
+              placeholder="pnx_…"
+              value=""
+              submitLabel={connectLabel}
+              onSubmit={value => connect(value)}
+            />
+          )}
           {(u.setupDone ?? []).map((text, n) => (
             <Text key={`setup-done-${n}`} color="success">
               {cap(`   ✓ ${text}`, inner)}
@@ -697,15 +924,40 @@ export const register: Register = (on, options) => {
             </Text>
           )}
           <Text> </Text>
-          <Text dimColor>The key is checked, saved for this plugin only and never sent to the chat.</Text>
-          <Text dimColor>Closed this panel? Type /pnx-context to open it again. Dev cycles run while Claude Code is open.</Text>
+          <Text dimColor>Saved for this plugin only, never sent to the chat.</Text>
+        </Box>
+      )
+    }
+
+    const labelOf = (base: string): string => ENVIRONMENTS.find(x => x.base === base)?.label ?? base.replace(/^https:\/\//, '')
+    // A saved key that is not a PlatformNEX key counts as not set (readCfg); say so rather than just asking for one.
+    const savedKey = keyOf(options)
+    const isSavedKeyMalformed = cfg === undefined && !isDisconnected && savedKey !== '' && !savedKey.startsWith('pnx_')
+    // PlatformNEX refused the key in use (revoked or expired): that is no connection, so the pane asks for a new key.
+    const isKeyRefused = cfg !== undefined && d.status === 'error' && d.error === KEY_REFUSED
+
+    if (d.status === 'unconfigured' || cfg === undefined || isKeyRefused) {
+      // The environment picked here, else the key's or the saved address's, else production.
+      const env: EnvironmentId = u.setupEnv ?? environmentOf(cfg?.base ?? safeBaseUrl(urlOf(options))) ?? 'prod'
+      const why = isKeyRefused
+        ? `${labelOf(cfg.base)} didn't accept the saved API key (revoked or expired?). Create a new one and paste it here.`
+        : isSavedKeyMalformed
+          ? "The saved API key isn't a PlatformNEX key (it starts with pnx_). Paste a new one."
+          : undefined
+
+      return panel(
+        'SET UP PLATFORMNEX',
+        'warning',
+        undefined,
+        <Box flexDirection="column">
+          {setupForm(env, isKeyRefused ? cfg : undefined, why)}
+          <Text dimColor>Closed this panel? Reopen it with /pnx-context.</Text>
         </Box>,
       )
     }
 
-    // Which PlatformNEX the saved key is for, and whether it refused the key (every lookup failed on it).
-    const envLabel = ENVIRONMENTS.find(x => x.base === cfg.base)?.label ?? cfg.base.replace(/^https:\/\//, '')
-    const isKeyRefused = d.status === 'error' && d.error === KEY_REFUSED
+    // Which PlatformNEX the key in use is for.
+    const envLabel = labelOf(cfg.base)
     const roots = d.repos.map(r => r.root)
     const cwdRoot = d.repos.length === 0 ? undefined : rootContaining(await $.session.cwd(), roots)
     const activeRoot = [u.chosenRoot, cwdRoot, u.touchedRoot].find(r => r !== undefined && roots.includes(r)) ?? d.repos.find(r => r.matches.length > 0)?.root
@@ -842,59 +1094,161 @@ export const register: Register = (on, options) => {
       )
     }
 
+    const checkStatus = checkState(u.check ?? { groups: [], isReady: false })
+
     return (
       <Box flexDirection="column">
-        {/* Header: what this is, where, and how fresh. */}
-        <Box flexDirection="column" alignItems="center">
-          <Text bold>{cap(`PLATFORMNEX${active === undefined ? '' : ` · ${active.name}`}`, columns)}</Text>
-          <Box flexDirection="row">
-            <Text dimColor>
-              {`${active?.branch === undefined ? '' : `${cap(active.branch, 30)} · `}${matched} of ${d.repos.length} repos · ${ago(d.at, now)} `}
-            </Text>
-            <Button key="refresh" plain hotkey="r" onPress={act(() => refresh($, cfg, true))}>
+        {/* Header: the title in the middle (an empty column on the left as wide as the buttons on the right), then the
+            connection, then under a rule the repository in view. */}
+        <Box flexDirection="row">
+          <Box width={HEADER_ACTIONS} />
+          <Box flexGrow={1} justifyContent="center">
+            <Text bold>PLATFORMNEX</Text>
+          </Box>
+          <Box width={HEADER_ACTIONS} flexDirection="row" justifyContent="flex-end" gap={1}>
+            <Button
+              key="refresh"
+              plain
+              hotkey="r"
+              onPress={act(async () => {
+                // A fresh connection: sign in again with the key (a refused one goes back to setup) and read everything
+                // again. Dev cycles that are not running start again now, with what they need looked up afresh (after
+                // installing pnx or gh, say), not at the next retry. Running ones are left alone: a job may be under way.
+                forgetToken()
+                if (stopWorker === undefined && activeWorkerCfg() !== undefined) {
+                  nextWorkerTry = 0
+                  await setClaudeCode($, 'connecting')
+                  keepWorker($, activeWorkerCfg())
+                }
+                await refresh($, cfg, true)
+              })}
+            >
               ⟳
             </Button>
-            <Button key="check" plain hotkey="k" onPress={act(() => runCheck($, checkOptions()))}>
-              {' ✓ check (k)'}
+            <Button
+              key="check"
+              plain
+              hotkey="k"
+              onPress={act(async () => {
+                await update($, ui, x => ({ ...x, connOpen: false, confirmDisconnect: false }))
+                await runCheck($, checkOptions())
+              })}
+            >
+              {hint('✓ check', 'k')}
             </Button>
           </Box>
-          <Box flexDirection="row" gap={2}>
-            <Box flexDirection="row">
-              <Text color={healthTone(currentStatus)}>■ </Text>
-              <Text dimColor>health</Text>
-            </Box>
-            <Box flexDirection="row">
-              <Text color="claude">■ </Text>
-              <Text dimColor>releases</Text>
-            </Box>
-          </Box>
         </Box>
-        <Text color={isKeyRefused ? 'error' : 'success'}>
-          {cap(isKeyRefused ? `✗ ${envLabel} didn't accept the saved API key (revoked or expired?): run /pnx-context setup to save a new one` : `✓ Connected to ${envLabel} with your API key`, columns * 2)}
-        </Text>
-        {d.status === 'error' && d.error !== undefined && !isKeyRefused && <Text color="error">{cap(d.error, columns * 2)}</Text>}
+        {/* Two things that can fail apart: Claude Code reaching PlatformNEX with the key, and PlatformNEX reaching this
+            Claude Code for dev-cycle jobs. Neither depends on the repository. */}
+        <Box flexDirection="row" justifyContent="space-between">
+          <Box flexDirection="row">
+            <Text color="success">{'✓ PlatformNEX'.padEnd(STATUS_LABEL)}</Text>
+            <Text color="success">{cap(`connected to ${envLabel}`, Math.max(8, columns - STATUS_LABEL - 12))}</Text>
+          </Box>
+          {u.connOpen !== true && (
+            <Button
+              key="conn-open"
+              plain
+              hotkey="s"
+              onPress={act(() => update($, ui, x => ({ ...x, connOpen: true, confirmDisconnect: false, check: undefined, setupEnv: undefined, setupNote: undefined, setupDone: undefined })))}
+            >
+              {hint('change', 's')}
+            </Button>
+          )}
+        </Box>
+        {d.status === 'error' && d.error !== undefined && <Text color="error">{cap(d.error, columns * 2)}</Text>}
         {options['devCycles'] !== 'off' && (
-          <Text color={cc.status === 'online' ? 'success' : undefined} dimColor={cc.status !== 'online'}>
+          <Box flexDirection="row">
+            <Text color={cc.status === 'online' ? 'success' : cc.status === 'offline' ? 'warning' : undefined} dimColor={cc.status === 'connecting'}>
+              {`${cc.status === 'online' ? '●' : '○'} Dev cycles`.padEnd(STATUS_LABEL)}
+            </Text>
+            <Text color={cc.status === 'online' ? 'success' : cc.status === 'offline' ? 'warning' : undefined} dimColor={cc.status === 'connecting'}>
+              {cap(
+                cc.status === 'online' ? 'this Claude Code is online' : cc.status === 'offline' ? `offline · ${isTerminal ? 'k' : 'press k'} to see why` : 'connecting this Claude Code…',
+                Math.max(8, columns - STATUS_LABEL) * 2,
+              )}
+            </Text>
+          </Box>
+        )}
+        {rule}
+        {/* The repository in view, centred: which, how fresh, and the key to the colours below (only with a component). */}
+        <Box flexDirection="column" alignItems="center">
+          <Text dimColor>
             {cap(
-              cc.status === 'online'
-                ? '● Dev cycles: your Claude Code is online'
-                : cc.status === 'offline'
-                  ? '○ Dev cycles: your Claude Code is offline · press k to see why'
-                  : '○ Dev cycles: connecting your Claude Code…',
+              `${active === undefined ? '' : `${active.name}${active.branch === undefined ? '' : ` · ${cap(active.branch, 30)}`} · `}${matched} of ${d.repos.length} repos · ${ago(d.at, now)}`,
               columns * 2,
             )}
           </Text>
-        )}
+          {current !== undefined && (
+            <Box flexDirection="row" gap={2}>
+              <Box flexDirection="row">
+                <Text color={healthTone(currentStatus)}>■ </Text>
+                <Text dimColor>health</Text>
+              </Box>
+              <Box flexDirection="row">
+                <Text color="claude">■ </Text>
+                <Text dimColor>releases</Text>
+              </Box>
+            </Box>
+          )}
+        </Box>
         {rule}
+        {/* Change the connection: another environment or key, or Disconnect. The one in use stays until a new key connects. */}
+        {u.connOpen === true && (
+          <Box flexDirection="column">
+            {panel(
+              'CONNECTION',
+              'claude',
+              <Button
+                key="conn-close"
+                plain
+                hotkey="q"
+                onPress={act(() => {
+                  draftKey = ''
+
+                  return update($, ui, x => ({ ...x, connOpen: false, confirmDisconnect: false, setupEnv: undefined, setupNote: undefined, setupDone: undefined }))
+                })}
+              >
+                {lead('q', 'close')}
+              </Button>,
+              <Box flexDirection="column">
+                {setupForm(u.setupEnv ?? environmentOf(cfg.base) ?? 'prod', cfg)}
+                <Text> </Text>
+                {u.confirmDisconnect === true ? (
+                  <Box flexDirection="column">
+                    <Text color="warning">{cap(`Disconnect from ${envLabel}?`, inner)}</Text>
+                    <Text dimColor>{cap('Dev cycles stop and the pane goes back to setup.', inner * 2)}</Text>
+                    <Box flexDirection="row" gap={1}>
+                      <Button key="disconnect-yes" variant="primary" onPress={act(() => disconnect($, cfg))}>
+                        Yes, disconnect
+                      </Button>
+                      <Button key="disconnect-no" onPress={act(() => update($, ui, x => ({ ...x, confirmDisconnect: false })))}>
+                        No
+                      </Button>
+                    </Box>
+                  </Box>
+                ) : (
+                  <Button key="disconnect" plain onPress={act(() => update($, ui, x => ({ ...x, confirmDisconnect: true })))}>
+                    ⏻ disconnect
+                  </Button>
+                )}
+              </Box>,
+            )}
+            {rule}
+          </Box>
+        )}
         {u.check !== undefined && (
           <Box flexDirection="column">
             {panel(
               'CHECK',
-              u.check.isReady ? 'success' : 'warning',
-              <Button key="check-dismiss" plain hotkey="q" onPress={act(() => update($, ui, x => ({ ...x, check: undefined })))}>
-                q close
-              </Button>,
-              <Box flexDirection="column">{checkLines(u.check.lines)}</Box>,
+              checkStatus.tone,
+              <Box flexDirection="row" gap={2}>
+                <Text color={checkStatus.tone}>{checkStatus.text}</Text>
+                <Button key="check-dismiss" plain hotkey="q" onPress={act(() => update($, ui, x => ({ ...x, check: undefined })))}>
+                  {lead('q', 'close')}
+                </Button>
+              </Box>,
+              checkBody(u.check),
             )}
             {rule}
           </Box>
@@ -908,11 +1262,11 @@ export const register: Register = (on, options) => {
               <Box flexDirection="row" gap={1}>
                 {expandable(newest) && (
                   <Button key="ask-toggle" plain hotkey="m" onPress={act(() => update($, ui, x => ({ ...x, askOpen: x.askOpen !== true })))}>
-                    {askOpen ? 'm collapse' : 'm expand'}
+                    {lead('m', askOpen ? 'collapse' : 'expand')}
                   </Button>
                 )}
                 <Button key="ask-dismiss" plain hotkey="x" onPress={act(() => update($, ui, x => ({ ...x, askHidden: newest.id, askOpen: false })))}>
-                  x
+                  {isTerminal ? 'dismiss' : 'x'}
                 </Button>
               </Box>
             </Box>
@@ -935,10 +1289,10 @@ export const register: Register = (on, options) => {
                     {page + 1}/{pages}
                   </Text>
                   <Button key="page-prev" plain hotkey="p" onPress={act(() => update($, ui, x => ({ ...x, page: Math.max(0, page - 1) })))}>
-                    ‹ p
+                    {isTerminal ? '‹' : '‹ p'}
                   </Button>
                   <Button key="page-next" plain hotkey="n" onPress={act(() => update($, ui, x => ({ ...x, page: Math.min(pages - 1, page + 1) })))}>
-                    n ›
+                    {isTerminal ? '›' : 'n ›'}
                   </Button>
                 </Box>
               )}
@@ -970,7 +1324,7 @@ export const register: Register = (on, options) => {
                         await refresh($, cfg, true)
                       })}
                     >
-                      {`  ${letter} ${inCatalog ? '●' : '○'} ${label}`}
+                      {isTerminal ? `${inCatalog ? '●' : '○'} ${label}` : `  ${letter} ${inCatalog ? '●' : '○'} ${label}`}
                     </Button>
                   )}
                   <Text dimColor>{where}</Text>
@@ -987,7 +1341,7 @@ export const register: Register = (on, options) => {
             <Box flexDirection="row" gap={2}>
               {shown.map((m, i) => (
                 <Button key={`tab-${m.entityRef}`} {...(m === current ? {} : { plain: true as const })} hotkey={String(i + 1)} onPress={act(() => update($, ui, x => ({ ...x, activeEntity: m.entityRef })))}>
-                  {`${i + 1} ${cap(m.title ?? m.name, 18)} `}
+                  {`${isTerminal ? '' : `${i + 1} `}${cap(m.title ?? m.name, 18)} `}
                   <Text color={healthTone(m.health?.status ?? 'unknown')}>●</Text>
                 </Button>
               ))}

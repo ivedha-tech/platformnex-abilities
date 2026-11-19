@@ -1,6 +1,8 @@
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
+import { FIND_PNX, MIN_PNX } from '../hooks/worker'
+
 const BASE = 'https://portal.example.test'
 const KEY = 'pnx_test_key_do_not_use'
 const OPTIONS = { baseUrl: BASE, apiKey: KEY }
@@ -41,17 +43,57 @@ const json = (body: unknown, status = 200) => ({ value: { status, ok: status >= 
 type Sent = { url: string; method: string; headers: Record<string, string>; body?: string }
 
 /** Stubs what sits beneath the mod: the host's network, shell and repo. Records every request. */
-const stubWorld = (on: On, sent: Sent[], opts: { scan?: string; releases?: unknown; created?: unknown; byRepo?: unknown; byRepoStatus?: number; tokenStatus?: number } = {}) => {
+const stubWorld = (
+  on: On,
+  sent: Sent[],
+  opts: {
+    scan?: string
+    releases?: unknown
+    created?: unknown
+    byRepo?: unknown
+    byRepoStatus?: number
+    tokenStatus?: number
+    tokensBeforeRefusal?: number
+    /** The lookup's answer for a host other than BASE, by its address. */
+    byRepoAt?: Record<string, unknown>
+    /** Holds the repository scan numbered `scan` (from 1) until `until` resolves: a refresh caught mid-way. */
+    holdScan?: { scan: number; until: Promise<void> }
+    /** What the pnx lookup prints, after `until` resolves: a worker caught while it starts. */
+    findPnx?: { stdout: string; until: Promise<void> }
+    /** Every process the plugin starts (pnx), recorded and refused. */
+    spawned?: (readonly string[])[]
+  } = {},
+) => {
+  let tokens = 0
+  let scans = 0
+  // A started process is recorded and ends at once, printing nothing.
+  on('process.spawn', async function* (_, e) {
+    opts.spawned?.push(e.argv)
+
+    return { value: { code: 1, signal: null } }
+  })
   on('command.register', () => ({ value: { command: 'pnx-context' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.status', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: '/w/gateway' }))
   on('session.repo', () => ({ value: { root: '/w/gateway', remote: 'x', internal: false, name: null } }))
-  on('process.run', () => ({ value: { exitCode: 0, stdout: opts.scan ?? SCAN, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('process.run', async (_, e) => {
+    if (e.argv[0] === 'sh' && ++scans === opts.holdScan?.scan) await opts.holdScan.until
+    if (opts.findPnx !== undefined && e.argv[2] === FIND_PNX) {
+      await opts.findPnx.until
+
+      return { value: { exitCode: 0, stdout: opts.findPnx.stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+
+    return { value: { exitCode: 0, stdout: opts.scan ?? SCAN, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   on('http.fetch', (_, e) => {
     sent.push({ url: e.url, method: e.init?.method ?? 'GET', headers: (e.init?.headers ?? {}) as Record<string, string>, body: typeof e.init?.body === 'string' ? e.init.body : undefined })
+    if (e.url.endsWith('/auth/api-key-token') && opts.tokensBeforeRefusal !== undefined && ++tokens > opts.tokensBeforeRefusal) return json({ success: false }, 401)
     if (e.url.endsWith('/auth/api-key-token')) return opts.tokenStatus === undefined ? json({ success: true, data: { accessToken: 'short-lived', expiresIn: 900 } }) : json({ success: false, error: { message: 'This API key is invalid, expired or revoked.' } }, opts.tokenStatus)
+    const elsewhere = Object.keys(opts.byRepoAt ?? {}).find(host => e.url.startsWith(`${host}/`))
+    if (e.url.includes('/entities/by-repo') && elsewhere !== undefined) return json(opts.byRepoAt?.[elsewhere])
     if (e.url.includes('/entities/by-repo')) return opts.byRepoStatus === undefined ? json(opts.byRepo ?? BY_REPO) : json({ success: false }, opts.byRepoStatus)
     if (e.url.includes('/health')) return json(HEALTH)
     if (e.url.endsWith('/dashboard/batch')) return json(BATCH)
@@ -317,5 +359,435 @@ test('a folder with many repositories lists them a page at a time, and a reposit
   await clock.settle()
   expect(await ui.find({ key: 'pick-/w/r8' })).toBeUndefined()
   expect(await ui.find({ key: 'pick-/w/r0' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('setup says ahead of time how the key will be kept, and says why a pasted key is refused', async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  const sent: Sent[] = []
+  stubWorld(on, sent)
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  // Before any key: what will happen to it, never that it already was checked.
+  expect((await ui.find({ type: 'Text', text: /never sent to the chat/ }))?.text).toBe('Saved for this plugin only, never sent to the chat.')
+  expect((await ui.find({ type: 'Text', text: /\/pnx-context/ }))?.text).toBe('Closed this panel? Reopen it with /pnx-context.')
+  expect(await ui.find({ type: 'Text', text: /The key is checked/ })).toBeUndefined()
+  await ui.input({ key: 'setup-key', text: 'not a key' })
+  await clock.settle()
+  expect((await ui.find({ type: 'Text', text: /doesn't look like a PlatformNEX key/ }))?.text).toBeDefined()
+  expect(sent).toEqual([])
+  await ui.unmount()
+})
+
+test('change (s) opens the CONNECTION panel, and q closes it with the connection unchanged', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  stubWorld(on, sent)
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  expect((await ui.find({ type: 'Text', text: /^connected to / }))?.text).toBe('connected to portal.example.test')
+  await ui.press({ key: 'conn-open' })
+  expect((await ui.find({ type: 'Text', text: /^CONNECTION$/ }))?.text).toBe('CONNECTION')
+  expect(await ui.find({ key: 'setup-key' })).toBeDefined()
+  expect(await ui.find({ key: 'disconnect' })).toBeDefined()
+  // The open button hides while the panel is open.
+  expect(await ui.find({ key: 'conn-open' })).toBeUndefined()
+
+  await ui.press({ key: 'conn-close' })
+  expect(await ui.find({ type: 'Text', text: /^CONNECTION$/ })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /^GATEWAY$/ }))?.text).toBe('GATEWAY')
+  await ui.unmount()
+})
+
+test('a key that is not accepted while switching keeps the connection in use', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  stubWorld(on, sent)
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'conn-open' })
+  await ui.input({ key: 'setup-key', text: 'not a key' })
+  await clock.settle()
+
+  expect((await ui.find({ type: 'Text', text: /doesn't look like a PlatformNEX key/ }))?.text).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /^CONNECTION$/ }))?.text).toBe('CONNECTION')
+  expect((await ui.find({ type: 'Text', text: /^connected to / }))?.text).toMatch(/portal\.example\.test/)
+  expect((await ui.find({ type: 'Text', text: /^GATEWAY$/ }))?.text).toBe('GATEWAY')
+  await ui.unmount()
+})
+
+test('switching to another environment connects there at once and asks only that one', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  stubWorld(on, sent)
+  const DIT1 = 'https://agentic-platformnex-portal.dit1.ivedha.dev'
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'conn-open' })
+  await ui.press({ key: 'env-dit1' })
+  sent.length = 0
+  await ui.input({ key: 'setup-key', text: 'pnx_other_test_key_do_not_use' })
+  await clock.settle()
+
+  expect(await ui.find({ type: 'Text', text: /^CONNECTION$/ })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /^connected to / }))?.text).toBe('connected to dit1')
+  expect(sent.length).toBeGreaterThan(0)
+  expect(sent.every(r => r.url.startsWith(`${DIT1}/`))).toBe(true)
+  // A token of its own: the one from the earlier connection is never sent to dit1.
+  expect(sent.some(r => r.url === `${DIT1}/api/catalog/auth/api-key-token`)).toBe(true)
+  // Neither key is ever drawn.
+  expect(JSON.stringify(await ui.drawn())).not.toContain('pnx_other_test_key')
+  expect(JSON.stringify(await ui.drawn())).not.toContain(KEY)
+  await ui.unmount()
+})
+
+test('disconnect asks first, then goes back to setup and stops asking PlatformNEX', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  stubWorld(on, sent)
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'conn-open' })
+  await ui.press({ key: 'disconnect' })
+
+  // Nothing changes until yes.
+  expect((await ui.find({ type: 'Text', text: /Disconnect from/ }))?.text).toMatch(/Disconnect from portal\.example\.test\?/)
+  await ui.press({ key: 'disconnect-no' })
+  expect(await ui.find({ type: 'Text', text: /Disconnect from/ })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /^GATEWAY$/ }))?.text).toBe('GATEWAY')
+
+  await ui.press({ key: 'disconnect' })
+  await ui.press({ key: 'disconnect-yes' })
+  await clock.settle()
+
+  expect((await ui.find({ type: 'Text', text: /SET UP PLATFORMNEX/ }))?.text).toBe('SET UP PLATFORMNEX')
+  expect((await ui.find({ type: 'Text', text: /Disconnected/ }))?.text).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^GATEWAY$/ })).toBeUndefined()
+
+  sent.length = 0
+  const { text = '' } = await $.command.run({ command: 'pnx-context', args: 'check', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
+  expect(text).toMatch(/✗ API key set\s+not set/)
+  expect(sent).toEqual([])
+  await ui.unmount()
+})
+
+test('a saved key that is not a PlatformNEX key goes back to setup and says so, and nothing is sent', { options: { baseUrl: BASE, apiKey: 'not-a-platformnex-key' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  const sent: Sent[] = []
+  stubWorld(on, sent)
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  expect((await ui.find({ type: 'Text', text: /SET UP PLATFORMNEX/ }))?.text).toBe('SET UP PLATFORMNEX')
+  expect((await ui.find({ type: 'Text', text: /isn't a PlatformNEX key/ }))?.text).toMatch(/✗ The saved API key isn't a PlatformNEX key/)
+  expect(await ui.find({ type: 'Text', text: /^connected to / })).toBeUndefined()
+  expect(sent).toEqual([])
+  await ui.unmount()
+})
+
+test('a key PlatformNEX refuses goes back to setup even with no repository to look up', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  const sent: Sent[] = []
+  stubWorld(on, sent, { scan: '', tokenStatus: 401 })
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  // The key was tried (one sign-in) even though there was nothing to look up.
+  expect(sent.some(r => r.url === `${BASE}/api/catalog/auth/api-key-token`)).toBe(true)
+  expect((await ui.find({ type: 'Text', text: /SET UP PLATFORMNEX/ }))?.text).toBe('SET UP PLATFORMNEX')
+  expect((await ui.find({ type: 'Text', text: /didn't accept the saved API key/ }))?.text).toMatch(/portal\.example\.test didn't accept the saved API key/)
+  expect(await ui.find({ type: 'Text', text: /^connected to / })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a good key with no repository to look up still shows Connected, after one sign-in', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  const sent: Sent[] = []
+  stubWorld(on, sent, { scan: '' })
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  expect((await ui.find({ type: 'Text', text: /^connected to / }))?.text).toBe('connected to portal.example.test')
+  expect((await ui.find({ type: 'Text', text: /No git repository found here/ }))?.text).toBeDefined()
+  expect(sent.map(r => r.url)).toEqual([`${BASE}/api/catalog/auth/api-key-token`])
+  await ui.unmount()
+})
+
+test('refresh (r) is a fresh connection: it signs in again and reads everything again', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  stubWorld(on, sent)
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  sent.length = 0
+
+  await ui.press({ key: 'refresh' })
+  await clock.settle()
+
+  // Not the cached token: a new sign-in with the key, then the lookup again.
+  expect(sent[0]?.url).toBe(`${BASE}/api/catalog/auth/api-key-token`)
+  expect(sent.some(r => r.url.includes('/entities/by-repo'))).toBe(true)
+  expect((await ui.find({ type: 'Text', text: /^connected to / }))?.text).toBe('connected to portal.example.test')
+  await ui.unmount()
+})
+
+test('the terminal draws hotkeys itself, so labels carry them only on other surfaces', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  stubWorld(on, sent)
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+
+  const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await term.find({ key: 'check' }))?.text).toBe('✓ check')
+  expect((await term.find({ key: 'conn-open' }))?.text).toBe('change')
+  await term.unmount()
+
+  const code = await $.ui.mount({ ...PANE, surface: 'vscode' })
+  expect((await code.find({ key: 'check' }))?.text).toBe('✓ check (k)')
+  expect((await code.find({ key: 'conn-open' }))?.text).toBe('change (s)')
+  await code.unmount()
+})
+
+test('in the terminal the key sits in a box with a connect button beside it, and the button connects', async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  const sent: Sent[] = []
+  stubWorld(on, sent)
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  expect((await term.find({ key: 'setup-connect' }))?.text).toBe('connect')
+  // Typed but not submitted: the button uses it.
+  await term.input({ key: 'setup-key', text: 'not a key', kind: 'change' })
+  await term.press({ key: 'setup-connect' })
+  await clock.settle()
+  expect((await term.find({ type: 'Text', text: /doesn't look like a PlatformNEX key/ }))?.text).toBeDefined()
+  await term.unmount()
+
+  // VS Code draws its own button for the field: no second one.
+  const code = await $.ui.mount({ ...PANE, surface: 'vscode' })
+  expect(await code.find({ key: 'setup-connect' })).toBeUndefined()
+  await code.unmount()
+})
+
+test('the API keys address is dim text in the terminal and a short link elsewhere', async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  const sent: Sent[] = []
+  stubWorld(on, sent)
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+
+  const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await term.find({ type: 'Text', text: /\/account\/api-keys$/ })).toMatchObject({ props: { dimColor: true } })
+  expect(await term.find({ type: 'Link' })).toBeUndefined()
+  await term.unmount()
+
+  const code = await $.ui.mount({ ...PANE, surface: 'vscode' })
+  expect((await code.find({ type: 'Link' }))?.text).toMatch(/^↗ open API keys \(Production\)$/)
+  await code.unmount()
+})
+
+test('CHECK shows one summary line, and only what failed with its fix', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  stubWorld(on, sent)
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'check' })
+  await clock.settle()
+
+  expect((await ui.find({ key: 'check-group-key' }))?.text).toBe('✓ key')
+  expect((await ui.find({ key: 'check-group-lookup' }))?.text).toBe('✓ lookup')
+  // The steps that passed are not listed one by one, and the address is not repeated.
+  expect(await ui.find({ type: 'Text', text: /URL set/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /key format/ })).toBeUndefined()
+  // Every line drawn under the summary is a failure or its fix.
+  const fails = await ui.findAll({ type: 'Text', text: /^✗ / })
+  const fixes = await ui.findAll({ type: 'Text', text: /^ {2}→ / })
+  expect(fixes.length).toBeLessThanOrEqual(fails.length)
+  await ui.unmount()
+})
+
+test('CHECK with a refused key says not ready and names the key, with its fix', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  // The key works for the pane's own reads, then is refused when the check signs in afresh.
+  stubWorld(on, sent, { tokensBeforeRefusal: 1 })
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'check' })
+  await clock.settle()
+
+  expect((await ui.find({ type: 'Text', text: /not ready/ }))?.text).toBe('✗ not ready')
+  expect((await ui.find({ key: 'check-group-key' }))?.text).toBe('✗ key')
+  expect((await ui.find({ type: 'Text', text: /^✗ key accepted/ }))?.text).toMatch(/the API key was not accepted/)
+  expect((await ui.find({ type: 'Text', text: /→ create a new key/ }))?.text).toBeDefined()
+  await ui.unmount()
+})
+
+test('the header puts the connection first and the repository under a rule', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  stubWorld(on, sent)
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'vscode' })
+
+  expect((await ui.find({ type: 'Text', text: /^PLATFORMNEX$/ }))?.text).toBe('PLATFORMNEX')
+  expect((await ui.find({ type: 'Text', text: /^✓ PlatformNEX/ }))?.text).toMatch(/^✓ PlatformNEX\s+$/)
+  expect((await ui.find({ type: 'Text', text: /Dev cycles\s*$/ }))?.text).toMatch(/^[●○] Dev cycles\s+$/)
+  expect((await ui.find({ type: 'Text', text: /repos ·/ }))?.text).toMatch(/^gateway · feat\/x · 1 of 1 repos · /)
+  // The colour key shows with a component, as here.
+  expect((await ui.find({ type: 'Text', text: /^health$/ }))?.text).toBe('health')
+  await ui.unmount()
+})
+
+test('without a component the colour key is not shown', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  const sent: Sent[] = []
+  stubWorld(on, sent, { scan: '' })
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'vscode' })
+
+  expect((await ui.find({ type: 'Text', text: /^connected to / }))?.text).toBe('connected to portal.example.test')
+  expect(await ui.find({ type: 'Text', text: /^health$/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a refresh still running for the old connection never shows its data after a switch', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  const DIT1 = 'https://agentic-platformnex-portal.dit1.ivedha.dev'
+  const web = { ...BY_REPO.data.items[0], entityRef: 'component:default/web', name: 'web', title: 'Web' }
+  let release = (): void => undefined
+  const until = new Promise<void>(resolve => {
+    release = resolve
+  })
+  // The second scan is the ⟳ refresh below, still with the old connection: it waits until the switch is done.
+  stubWorld(on, sent, { holdScan: { scan: 2, until }, byRepoAt: { [DIT1]: { success: true, data: { items: [web] } } } })
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /^GATEWAY$/ }))?.text).toBe('GATEWAY')
+
+  await ui.press({ key: 'refresh' })
+  await ui.press({ key: 'conn-open' })
+  await ui.press({ key: 'env-dit1' })
+  await ui.input({ key: 'setup-key', text: 'pnx_other_test_key_do_not_use' })
+  await clock.settle()
+  // The old refresh ends now, with the old environment's answer.
+  release()
+  await clock.settle()
+
+  expect((await ui.find({ type: 'Text', text: /^connected to / }))?.text).toBe('connected to dit1')
+  expect((await ui.find({ type: 'Text', text: /^WEB$/ }))?.text).toBe('WEB')
+  expect(await ui.find({ type: 'Text', text: /^GATEWAY$/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a worker still looking for pnx when the connection is dropped never starts with the old key', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  const spawned: (readonly string[])[] = []
+  let release = (): void => undefined
+  const until = new Promise<void>(resolve => {
+    release = resolve
+  })
+  // pnx is there and new enough, but the lookup answers only after Disconnect.
+  stubWorld(on, sent, { spawned, findPnx: { stdout: JSON.stringify({ cli: '/pnx/cli.js', version: MIN_PNX }), until } })
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'conn-open' })
+  await ui.press({ key: 'disconnect' })
+  await ui.press({ key: 'disconnect-yes' })
+  await clock.settle()
+  release()
+  await clock.settle()
+
+  expect((await ui.find({ type: 'Text', text: /SET UP PLATFORMNEX/ }))?.text).toBe('SET UP PLATFORMNEX')
+  expect(spawned).toEqual([])
+  await ui.unmount()
+})
+
+test('a key PlatformNEX refuses is not retried for dev cycles', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  const spawned: (readonly string[])[] = []
+  stubWorld(on, sent, { scan: '', tokenStatus: 401, spawned, findPnx: { stdout: JSON.stringify({ cli: '/pnx/cli.js', version: MIN_PNX }), until: Promise.resolve() } })
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  // At most the one start made before the first refresh found the key refused.
+  const before = spawned.length
+  expect(before).toBeLessThanOrEqual(1)
+
+  // Well past the worker's retry wait, with a refresh every 15 seconds.
+  await clock.advance(3 * 60_000)
+  expect(spawned.length).toBe(before)
+})
+
+test('a saved key in any pnx_ form counts as set', { options: { baseUrl: BASE, apiKey: 'pnx_test.key+with=other/chars' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  stubWorld(on, sent)
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  expect((await ui.find({ type: 'Text', text: /^connected to / }))?.text).toBe('connected to portal.example.test')
+  await ui.unmount()
+})
+
+test('in the terminal, connect can be pressed again after a failed try without typing again', { options: { baseUrl: BASE } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  const sent: Sent[] = []
+  stubWorld(on, sent, { tokenStatus: 401 })
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.input({ key: 'setup-key', text: 'pnx_refused_test_key_do_not_use', kind: 'change' })
+
+  await ui.press({ key: 'setup-connect' })
+  await clock.settle()
+  await ui.press({ key: 'setup-connect' })
+  await clock.settle()
+
+  // Both presses tried the key: one sign-in each.
+  expect(sent.filter(r => r.url.endsWith('/auth/api-key-token')).length).toBe(2)
   await ui.unmount()
 })
