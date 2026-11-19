@@ -290,12 +290,12 @@ const setupNote = ($: EngineInterface, text: string, tone: 'error' | 'success' |
  * Setup from the pane: checks the pasted key with the chosen PlatformNEX, then saves it and the address the way
  * `claude plugin configure --values-stdin` does (the key only on stdin). The key is never kept in state, shown or logged.
  */
-const saveKey = async ($: EngineInterface, pasted: string, env: EnvironmentId): Promise<void> => {
+const saveKey = async ($: EngineInterface, pasted: string, env: EnvironmentId): Promise<boolean> => {
   const key = extractKey(pasted)
   if (key === undefined) {
     await setupNote($, "That doesn't look like a PlatformNEX key (it starts with pnx_). Copy it again from the portal.", 'error')
 
-    return
+    return false
   }
   const base = baseOf(env)
   const label = ENVIRONMENTS.find(e => e.id === env)?.label ?? env
@@ -305,7 +305,7 @@ const saveKey = async ($: EngineInterface, pasted: string, env: EnvironmentId): 
     if (accepted?.ok !== true) {
       await setupNote($, `${label} didn't accept this key (${accepted?.detail ?? 'could not check'}). Create a new key there and paste it again.`, 'error')
 
-      return
+      return false
     }
     const found = await $.process.run(['node', '-e', FIND_CLAUDE], { timeoutMs: 10_000 }).catch(() => undefined)
     const claude = found?.stdout.trim() || 'claude'
@@ -313,14 +313,20 @@ const saveKey = async ($: EngineInterface, pasted: string, env: EnvironmentId): 
     if (saved.exitCode !== 0) {
       await setupNote($, `The key works but could not be saved: ${lineNote(saved.stderr || saved.stdout) ?? 'claude plugin configure failed'}`, 'error')
 
-      return
+      return false
     }
-    // Switch the pane to the connected view now (a restart reads the saved settings); the dev-cycle connection starts on the next tick.
+    // Everything counts at once, with no restart: the pane switches to the connected view, Claude gets the plan tool
+    // from the next prompt, and the check that follows starts the dev-cycle connection. A restart reads the saved settings.
     liveCfg = { base, key }
     await setupNote($, `Connected to ${label}.`, 'success')
     void refresh($, liveCfg, true).catch(() => undefined)
+    void registerPlanTool($)
+
+    return true
   } catch (error) {
     await setupNote($, `Could not finish setup: ${error instanceof Error ? lineNote(error.message) ?? 'unknown error' : 'unknown error'}`, 'error')
+
+    return false
   }
 }
 
@@ -368,6 +374,28 @@ const ROUTING =
   'PlatformNEX: when the person asks you to plan a change in a PlatformNEX System using PlatformNEX, call pnx_plan_change. ' +
   'It only plans and creates nothing, so say that. Name a System as system:default/<name>, e.g. system:default/speakupnex. ' +
   'The plan also appears in the PlatformNEX pane. For ordinary coding requests, follow the repository\'s own rules and do not call it.'
+
+// Whether Claude has the plan tool in this session: at start when a key was saved, else once the pane saves one.
+let hasPlanTool = false
+
+/** The model's way to ask PlatformNEX for a change plan. Read-only; the plan is also drawn in the pane. Never throws. */
+const registerPlanTool = ($: EngineInterface): Promise<void> =>
+  $.tool
+    .register({
+      name: 'pnx_plan_change',
+      isDeferred: false,
+      description:
+        "Plan a change in a PlatformNEX System, e.g. 'create a change for me in speakupnex'. Use it only when the person asks to plan the change in PlatformNEX. Returns the steps in order, starting with a ServiceNEX ticket, plus the System's environments and approval gates. It is a plan only: nothing is created, so tell the person and let them decide. The plan also appears in the PlatformNEX pane. The result ends with a link to PlatformNEX Agent mode, where the real plan is made: give that link to the person.",
+      inputSchema: {
+        type: 'object',
+        properties: { systemRef: { type: 'string', description: "The System's ref, e.g. system:default/speakupnex" }, summary: { type: 'string', description: 'What the change is, in one sentence' } },
+        required: ['systemRef', 'summary'],
+      },
+    })
+    .then(() => {
+      hasPlanTool = true
+    })
+    .catch(() => undefined)
 
 /** Keeps one plan (or why asking failed) for the pane and brings the pane up. It never throws. */
 const record = async ($: EngineInterface, tool: string, input: unknown, text: string | undefined, isError: boolean): Promise<void> => {
@@ -449,7 +477,7 @@ const devCycleCheck = async ($: EngineInterface, cfg: Cfg, isOff: boolean): Prom
   nextWorkerTry = 0
   keepWorker($, cfg)
 
-  return ['Dev cycles', formatSteps(devCycleSteps({ isOff, status: cc.status, note: cc.note, needs, pnx })), '  · trying to connect again now']
+  return ['Dev cycles', formatSteps(devCycleSteps({ isOff, status: cc.status, note: cc.note, needs, pnx })), '  · connecting now']
 }
 
 /** The pane's Check button: the same steps as /pnx-context check, kept for the pane to show (never the key). */
@@ -520,22 +548,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'pnx-context', description: 'Show the PlatformNEX component, health and releases for this repo' })
     void $.ui.open({ id: PANE, title: TITLE })
-    if (fromOptions !== undefined) {
-      // The model's way to ask PlatformNEX for a change plan. Read-only; the plan is also drawn in the pane.
-      void $.tool
-        .register({
-          name: 'pnx_plan_change',
-          isDeferred: false,
-          description:
-            "Plan a change in a PlatformNEX System, e.g. 'create a change for me in speakupnex'. Use it only when the person asks to plan the change in PlatformNEX. Returns the steps in order, starting with a ServiceNEX ticket, plus the System's environments and approval gates. It is a plan only: nothing is created, so tell the person and let them decide. The plan also appears in the PlatformNEX pane. The result ends with a link to PlatformNEX Agent mode, where the real plan is made: give that link to the person.",
-          inputSchema: {
-            type: 'object',
-            properties: { systemRef: { type: 'string', description: "The System's ref, e.g. system:default/speakupnex" }, summary: { type: 'string', description: 'What the change is, in one sentence' } },
-            required: ['systemRef', 'summary'],
-          },
-        })
-        .catch(() => undefined)
-    }
+    if (activeCfg() !== undefined) void registerPlanTool($)
     void refresh($, activeCfg(), true).catch(() => undefined)
     keepWorker($, activeWorkerCfg())
     $.clock.every(TICK_MS, () => {
@@ -560,8 +573,8 @@ export const register: Register = (on, options) => {
   // Tells the model when to use the plan tool, once configured.
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
-    // Only where the plan tool was registered (configured when the session started).
-    if (fromOptions === undefined) return composed
+    // Only once Claude has the plan tool.
+    if (!hasPlanTool) return composed
 
     return { sections: [...composed.sections, { id: 'pnx-context-routing', text: ROUTING, scope: 'session' as const }] }
   })
@@ -650,7 +663,7 @@ export const register: Register = (on, options) => {
           <Text> </Text>
           <Text>1  Create an API key</Text>
           <Link href={apiKeysUrl(baseOf(env))}>{`   ↗ open API keys (${ENVIRONMENTS.find(e => e.id === env)?.label ?? env})`}</Link>
-          <Text>2  Paste it here and press Enter</Text>
+          <Text>2  Paste it here and press connect</Text>
           <Input
             key="setup-key"
             label="   "
@@ -658,17 +671,11 @@ export const register: Register = (on, options) => {
             value=""
             submitLabel={u.setupBusy === true ? 'checking…' : 'connect'}
             onSubmit={value => {
-              if (u.setupBusy !== true) void saveKey($, value, env).catch(() => undefined)
+              // Once connected, the check runs by itself and its result shows in the connected view.
+              if (u.setupBusy !== true) void saveKey($, value, env).then(isSaved => (isSaved ? runCheck($, checkOptions()) : undefined)).catch(() => undefined)
             }}
           />
           {note !== undefined && <Text color={note.tone === 'info' ? undefined : note.tone}>{cap(note.text, inner * 3)}</Text>}
-          <Box flexDirection="row" gap={1}>
-            <Text>3  Check the connection</Text>
-            <Button key="setup-check" hotkey="k" onPress={act(() => runCheck($, checkOptions()))}>
-              ✓ check
-            </Button>
-          </Box>
-          {u.check !== undefined && <Box flexDirection="column">{checkLines(u.check.lines)}</Box>}
           <Text> </Text>
           <Text dimColor>The key is checked, saved for this plugin only and never sent to the chat.</Text>
         </Box>,
