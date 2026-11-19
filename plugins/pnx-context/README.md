@@ -6,7 +6,7 @@ A Claude Code mod that shows, beside your conversation, which PlatformNEX compon
 
 You need a personal API key. It acts as you, so keep it private.
 
-**In the pane** (the usual way, on any OS): pick the environment (Production or dit1), open **API keys** from the link, create a key, then paste it into the pane's field and press **connect** (it shows **checking…** meanwhile). The pane checks the key with that PlatformNEX, saves it for this plugin only (never in the chat), switches to the component view and runs the check, whose result stays in the pane (closing and reopening it keeps it) until `q` closes it. No restart is needed: Claude can use the plan tool from the next prompt. **✓ check** (`k`) runs it again at any time.
+**In the pane** (the usual way, on any OS): pick the environment (Production or dit1), open **API keys** from the link, create a key, then paste it into the pane's field and press **connect** (it shows **checking…** meanwhile). The pane checks the key with that PlatformNEX and saves it for this plugin only (never in the chat), ticking each step under the field (✓ key accepted, ✓ saved, ✓ connected; a ✗ with the reason if one fails). It then switches to the component view, which always says which PlatformNEX it is connected to (`✓ Connected to Production with your API key`, or a red line if that PlatformNEX later refuses the key), and runs the check, whose result stays in the pane (closing and reopening it keeps it) until `q` closes it. No restart is needed: Claude can use the plan tool from the next prompt. **✓ check** (`k`) runs it again at any time.
 
 **From a terminal** instead:
 

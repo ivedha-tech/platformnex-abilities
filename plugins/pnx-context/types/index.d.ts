@@ -92,7 +92,9 @@ export type Ui = {
   /** Setup in the pane: the environment picked (prod, dit1), whether a key is being checked, and the last result. Never the key. */
   setupEnv?: 'prod' | 'dit1'
   setupBusy?: boolean
-  setupNote?: { text: string; tone: 'error' | 'success' | 'info' }
+  setupNote?: { text: string; tone: 'error' | 'info' }
+  /** The steps of connecting that went well (key accepted, saved, connected), shown with a ✓. */
+  setupDone?: string[]
   /** The last Check's result lines (as /pnx-context check prints them, never the key), until dismissed. */
   check?: { lines: string[]; isReady: boolean }
 }

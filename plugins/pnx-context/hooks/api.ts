@@ -22,8 +22,11 @@ const MAX_BODY = 2_000_000
 
 let token: { value: string; expiresAt: number } | undefined
 
+/** Why a call failed when PlatformNEX refused the key (wrong, expired or revoked). */
+export const KEY_REFUSED = 'the API key was not accepted'
+
 const reasonFor = (status: number): string =>
-  status === 401 ? 'the API key was not accepted' : status === 403 ? 'not allowed' : status === 404 ? 'not found' : status === 429 ? 'rate limited, try again later' : `server answered ${status}`
+  status === 401 ? KEY_REFUSED : status === 403 ? 'not allowed' : status === 404 ? 'not found' : status === 429 ? 'rate limited, try again later' : `server answered ${status}`
 
 type Reply = { status: number; ok: boolean; text: string }
 
@@ -95,7 +98,7 @@ export async function call($: EngineInterface, cfg: Cfg, method: 'GET' | 'POST',
     return { status: reply.status, data: unwrap(reply.text) }
   }
 
-  throw new ApiFailure('the API key was not accepted', 401)
+  throw new ApiFailure(KEY_REFUSED, 401)
 }
 
 /** An MCP Streamable HTTP reply is JSON, or one server-sent event whose `data:` line is the JSON. */
@@ -129,7 +132,7 @@ export async function mcpCall($: EngineInterface, cfg: Cfg, name: string, args: 
 
     return { text, isError: parsed.result?.isError === true }
   }
-  throw new ApiFailure('the API key was not accepted', 401)
+  throw new ApiFailure(KEY_REFUSED, 401)
 }
 
 export function byRepo($: EngineInterface, cfg: Cfg, repoUrl: string) {

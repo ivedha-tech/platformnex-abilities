@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { ApiFailure, byRepo, call, checkAccess, createDraftRelease, mcpCall, openReleases, snapshots, systemHealth, type Cfg, type CheckStep } from './api'
+import { ApiFailure, KEY_REFUSED, byRepo, call, checkAccess, createDraftRelease, mcpCall, openReleases, snapshots, systemHealth, type Cfg, type CheckStep } from './api'
 import {
   ago,
   baseName,
@@ -284,13 +284,16 @@ const refresh = async ($: EngineInterface, cfg: Cfg | undefined, force: boolean)
   }
 }
 
-const setupNote = ($: EngineInterface, text: string, tone: 'error' | 'success' | 'info', busy = false) => update($, ui, u => ({ ...u, setupBusy: busy, setupNote: { text, tone } }))
+const setupNote = ($: EngineInterface, text: string, tone: 'error' | 'info', busy = false) => update($, ui, u => ({ ...u, setupBusy: busy, setupNote: { text, tone } }))
+// One step of connecting that went well, shown with a ✓ under step 2.
+const setupDone = ($: EngineInterface, text: string) => update($, ui, u => ({ ...u, setupDone: [...(u.setupDone ?? []), text] }))
 
 /**
  * Setup from the pane: checks the pasted key with the chosen PlatformNEX, then saves it and the address the way
  * `claude plugin configure --values-stdin` does (the key only on stdin). The key is never kept in state, shown or logged.
  */
 const saveKey = async ($: EngineInterface, pasted: string, env: EnvironmentId): Promise<boolean> => {
+  await update($, ui, u => ({ ...u, setupDone: [] }))
   const key = extractKey(pasted)
   if (key === undefined) {
     await setupNote($, "That doesn't look like a PlatformNEX key (it starts with pnx_). Copy it again from the portal.", 'error')
@@ -307,6 +310,8 @@ const saveKey = async ($: EngineInterface, pasted: string, env: EnvironmentId): 
 
       return false
     }
+    await setupDone($, `Key accepted by ${label}`)
+    await setupNote($, 'Saving it for this plugin…', 'info', true)
     const found = await $.process.run(['node', '-e', FIND_CLAUDE], { timeoutMs: 10_000 }).catch(() => undefined)
     const claude = found?.stdout.trim() || 'claude'
     const saved = await $.process.run([claude, 'plugin', 'configure', PLUGIN_ID, '--values-stdin'], { stdin: configureInput(key, base), timeoutMs: 30_000 })
@@ -317,8 +322,8 @@ const saveKey = async ($: EngineInterface, pasted: string, env: EnvironmentId): 
     }
     // Everything counts at once, with no restart: the pane switches to the connected view, Claude gets the plan tool
     // from the next prompt, and the check that follows starts the dev-cycle connection. A restart reads the saved settings.
+    await update($, ui, u => ({ ...u, setupBusy: false, setupNote: undefined, setupDone: [...(u.setupDone ?? []), 'Saved for this plugin', 'Connected, opening the component view…'] }))
     liveCfg = { base, key }
-    await setupNote($, `Connected to ${label}.`, 'success')
     void refresh($, liveCfg, true).catch(() => undefined)
     void registerPlanTool($)
 
@@ -655,7 +660,7 @@ export const register: Register = (on, options) => {
           <Box flexDirection="row" gap={1} flexWrap="wrap">
             <Text dimColor>Environment:</Text>
             {ENVIRONMENTS.map(e => (
-              <Button key={`env-${e.id}`} {...(e.id === env ? {} : { plain: true as const })} onPress={act(() => update($, ui, x => ({ ...x, setupEnv: e.id, setupNote: undefined })))}>
+              <Button key={`env-${e.id}`} {...(e.id === env ? {} : { plain: true as const })} onPress={act(() => update($, ui, x => ({ ...x, setupEnv: e.id, setupNote: undefined, setupDone: undefined })))}>
                 {`${e.id === env ? '●' : '○'} ${e.label}`}
               </Button>
             ))}
@@ -675,13 +680,26 @@ export const register: Register = (on, options) => {
               if (u.setupBusy !== true) void saveKey($, value, env).then(isSaved => (isSaved ? runCheck($, checkOptions()) : undefined)).catch(() => undefined)
             }}
           />
-          {note !== undefined && <Text color={note.tone === 'info' ? undefined : note.tone}>{cap(note.text, inner * 3)}</Text>}
+          {(u.setupDone ?? []).map((text, n) => (
+            <Text key={`setup-done-${n}`} color="success">
+              {cap(`   ✓ ${text}`, inner)}
+            </Text>
+          ))}
+          {note !== undefined && (
+            <Text color={note.tone === 'error' ? 'error' : undefined} dimColor={note.tone === 'info'}>
+              {cap(`   ${note.tone === 'error' ? '✗' : '·'} ${note.text}`, inner * 3)}
+            </Text>
+          )}
           <Text> </Text>
           <Text dimColor>The key is checked, saved for this plugin only and never sent to the chat.</Text>
+          <Text dimColor>Closed this panel? Type /pnx-context to open it again. Dev cycles run while Claude Code is open.</Text>
         </Box>,
       )
     }
 
+    // Which PlatformNEX the saved key is for, and whether it refused the key (every lookup failed on it).
+    const envLabel = ENVIRONMENTS.find(x => x.base === cfg.base)?.label ?? cfg.base.replace(/^https:\/\//, '')
+    const isKeyRefused = d.status === 'error' && d.error === KEY_REFUSED
     const roots = d.repos.map(r => r.root)
     const cwdRoot = d.repos.length === 0 ? undefined : rootContaining(await $.session.cwd(), roots)
     const activeRoot = [u.chosenRoot, cwdRoot, u.touchedRoot].find(r => r !== undefined && roots.includes(r)) ?? d.repos.find(r => r.matches.length > 0)?.root
@@ -845,7 +863,10 @@ export const register: Register = (on, options) => {
             </Box>
           </Box>
         </Box>
-        {d.status === 'error' && d.error !== undefined && <Text color="error">{cap(d.error, columns * 2)}</Text>}
+        <Text color={isKeyRefused ? 'error' : 'success'}>
+          {cap(isKeyRefused ? `✗ ${envLabel} didn't accept the saved API key (revoked or expired?): run /pnx-context setup to save a new one` : `✓ Connected to ${envLabel} with your API key`, columns * 2)}
+        </Text>
+        {d.status === 'error' && d.error !== undefined && !isKeyRefused && <Text color="error">{cap(d.error, columns * 2)}</Text>}
         {options['devCycles'] !== 'off' && (
           <Text color={cc.status === 'online' ? 'success' : undefined} dimColor={cc.status !== 'online'}>
             {cap(
