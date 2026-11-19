@@ -1,7 +1,7 @@
 {
   "name": "pnx-context",
-  "version": "0.7.0",
-  "description": "A sidebar pane showing which PlatformNEX component the repo you are in belongs to: health, open releases and small graphs, plus the change plan Claude asks PlatformNEX for. Read-only except one button that opens a draft release (never deploys). Opt-in; needs a personal PlatformNEX API key.",
+  "version": "0.8.0",
+  "description": "A sidebar pane showing which PlatformNEX component the repo you are in belongs to: health, open releases and small graphs, plus the change plan Claude asks PlatformNEX for. Once set up it also keeps your Claude Code connected while Claude Code is open, so the development cycles you start use your own Claude Code. Read-only except one button that opens a draft release (never deploys). Opt-in; needs a personal PlatformNEX API key.",
   "types": "./types/index.d.ts",
   "userConfig": {
     "baseUrl": {
@@ -16,6 +16,14 @@
       "title": "PlatformNEX API key",
       "description": "A personal key that starts with pnx_. Create it in the portal (user menu, API keys). It acts as you, so never paste it into chat or a file. Run /pnx-context setup in Claude Code for the exact command to save it.",
       "sensitive": true,
+      "required": false
+    },
+    "devCycles": {
+      "type": "string",
+      "title": "Dev cycles on this machine's Claude Code",
+      "description": "on: while Claude Code is open, this machine's Claude Code is connected to PlatformNEX with this key, so the development cycles you start (plans, Start coding, Continue) run here and may push a platformnex/ branch and open a draft pull request with your git and gh. off: the pane only.",
+      "options": ["on", "off"],
+      "default": "on",
       "required": false
     }
   }

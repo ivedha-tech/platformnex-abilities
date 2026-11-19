@@ -89,10 +89,21 @@ export type Ui = {
   pending?: { entityRef: string; environmentId: number; environmentName: string; branch: string; head?: string }
   /** The result of the last action, one line plus an optional link. */
   notice?: { text: string; url?: string }
+  /** Setup in the pane: the environment picked (prod, dit1), whether a key is being checked, and the last result. Never the key. */
+  setupEnv?: 'prod' | 'dit1'
+  setupBusy?: boolean
+  setupNote?: { text: string; tone: 'error' | 'info' }
+  /** The steps of connecting that went well (key accepted, saved, connected), shown with a ✓. */
+  setupDone?: string[]
+  /** The last Check's result lines (as /pnx-context check prints them, never the key), until dismissed. */
+  check?: { lines: string[]; isReady: boolean }
 }
+
+/** Whether this machine's Claude Code takes PlatformNEX's dev-cycle jobs now (the worker the plugin runs), and why the last try stopped. */
+export type ClaudeCode = { status: 'connecting' | 'online' | 'offline'; note?: string }
 
 declare module 'claude-code' {
   interface PluginState {
-    'pnx-context': { data: Shaped<Data>; ui: Shaped<Ui>; asks: Shaped<Asks> }
+    'pnx-context': { data: Shaped<Data>; ui: Shaped<Ui>; asks: Shaped<Asks>; claudeCode: Shaped<ClaudeCode> }
   }
 }
