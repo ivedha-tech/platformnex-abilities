@@ -161,6 +161,17 @@ export function devCycleSteps(w: { isOff: boolean; status: ClaudeCode['status'];
   return steps
 }
 
+/**
+ * What a session ending means for the worker. `/clear` and `/resume` keep Claude Code running, so it goes on (keep);
+ * `/exit`, Ctrl+C or a signal end Claude Code, so it stops (leave); anything else (a logout, a reason a later Claude Code
+ * adds) stops it and lets it start again if Claude Code goes on (pause).
+ */
+export function sessionEndAction(reason: string): 'keep' | 'leave' | 'pause' {
+  if (reason === 'clear' || reason === 'resume') return 'keep'
+
+  return reason === 'prompt_input_exit' || reason === 'other' ? 'leave' : 'pause'
+}
+
 /** Why the worker stopped, for the debug log: another window runs it, or its last error line. */
 export function endedNote(code: number | null, lastError: string | undefined): string {
   if (code === ALREADY_RUNNING_EXIT) return 'another Claude Code window on this machine runs it'

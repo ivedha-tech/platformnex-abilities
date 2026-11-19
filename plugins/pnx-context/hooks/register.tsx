@@ -32,7 +32,7 @@ import {
 } from './lib'
 import { OWN_PREFIX, handoffUrl, parseAsk, pickActiveMatch, pushAsk, scrub } from './skills'
 import { ENVIRONMENTS, FIND_CLAUDE, PLUGIN_ID, apiKeysUrl, baseOf, configureInput, environmentOf, extractKey, type EnvironmentId } from './setup'
-import { ALREADY_RUNNING_EXIT, FIND_DEVICE, FIND_NEEDS, FIND_PNX, MIN_PNX, MISSING_RETRY_MS, RETRY_MS, catalogUrlOf, devCycleSteps, endedNote, isAtLeast, isTakingJobs, lineNote, parseDeviceId, parseFind, parseNeeds } from './worker'
+import { ALREADY_RUNNING_EXIT, FIND_DEVICE, FIND_NEEDS, FIND_PNX, MIN_PNX, MISSING_RETRY_MS, RETRY_MS, catalogUrlOf, devCycleSteps, endedNote, isAtLeast, isTakingJobs, lineNote, parseDeviceId, parseFind, parseNeeds, sessionEndAction } from './worker'
 import type { Ask, Asks, ClaudeCode, Data, Match, RepoView, Ui } from '../types'
 
 const PANE = 'pnx-context'
@@ -535,16 +535,22 @@ export const register: Register = (on, options) => {
   // What the check reads: the saved settings, or the key saved from the pane this session.
   const checkOptions = (): Options => (fromOptions === undefined && liveCfg !== undefined ? { ...options, apiKey: liveCfg.key, baseUrl: liveCfg.base } : options)
 
-  // Leaving Claude Code stops the worker and tells PlatformNEX at once (a /clear keeps the session's process, and it).
+  // Leaving Claude Code stops the worker and tells PlatformNEX at once (/clear and /resume keep Claude Code, and it).
   // One request from here, not a pnx command: it fits session.end's short budget, and on Windows the stopped worker
   // can't say it itself.
   on('session.end', async ($, e, next) => {
     const workerCfg = activeWorkerCfg()
-    if (e.reason !== 'clear' && stopWorker !== undefined && workerCfg !== undefined) {
+    const action = sessionEndAction(e.reason)
+    if (action !== 'keep' && stopWorker !== undefined && workerCfg !== undefined) {
       isStopping = true
       const device = workerDevice
       stopWorker()
       if (device !== undefined) await call($, workerCfg, 'POST', `/api/catalog/devices/${encodeURIComponent(device)}/offline`, {}).catch(() => undefined)
+      // Claude Code may go on (a logout, or a reason it adds later): the next tick starts the worker again.
+      if (action === 'pause') {
+        isStopping = false
+        await setClaudeCode($, 'connecting').catch(() => undefined)
+      }
     }
 
     return next(e)

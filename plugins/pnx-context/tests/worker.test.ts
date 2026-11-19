@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { ALREADY_RUNNING_EXIT, MIN_PNX, catalogUrlOf, devCycleSteps, endedNote, isAtLeast, isTakingJobs, lineNote, parseDeviceId, parseFind, parseNeeds, type Needs } from '../hooks/worker'
+import { ALREADY_RUNNING_EXIT, MIN_PNX, catalogUrlOf, devCycleSteps, endedNote, isAtLeast, isTakingJobs, lineNote, parseDeviceId, parseFind, parseNeeds, sessionEndAction, type Needs } from '../hooks/worker'
 
 test('finds pnx from what the node lookup printed, and needs a new enough one', () => {
   expect(parseFind('{"cli":"C:\\\\npm\\\\node_modules\\\\@platformnex\\\\pnx\\\\dist\\\\cli.js","version":"0.1.18"}')).toEqual({ cli: 'C:\\npm\\node_modules\\@platformnex\\pnx\\dist\\cli.js', version: '0.1.18' })
@@ -68,4 +68,13 @@ test('takes the device id pnx saved, only for this PlatformNEX', () => {
   expect(parseDeviceId(saved, 'https://p.example/api/catalog')).toBe('d-1')
   expect(parseDeviceId(saved, 'https://other.example/api/catalog')).toBeUndefined()
   expect(parseDeviceId('', 'https://p.example/api/catalog')).toBeUndefined()
+})
+
+test('keeps the worker through /clear and /resume, stops it when Claude Code exits, and pauses it otherwise', () => {
+  expect(sessionEndAction('clear')).toBe('keep')
+  expect(sessionEndAction('resume')).toBe('keep')
+  expect(sessionEndAction('prompt_input_exit')).toBe('leave')
+  expect(sessionEndAction('other')).toBe('leave')
+  expect(sessionEndAction('logout')).toBe('pause')
+  expect(sessionEndAction('a-reason-added-later')).toBe('pause')
 })
