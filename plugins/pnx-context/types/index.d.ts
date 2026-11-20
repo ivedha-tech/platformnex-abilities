@@ -110,6 +110,8 @@ export type Ui = {
   connOpen?: boolean
   /** True while Disconnect waits for the person's yes. */
   confirmDisconnect?: boolean
+  /** True while the pane reads everything again (⟳, a new connection, the timer), or a ⟳ waits for one to finish. */
+  isRefreshing?: boolean
 }
 
 /** Whether this machine's Claude Code takes PlatformNEX's dev-cycle jobs now (the worker the plugin runs), and why the last try stopped. */

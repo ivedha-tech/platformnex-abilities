@@ -13,18 +13,20 @@ import {
   dedupeByRemote,
   healthLabel,
   healthTone,
+  isAbsolutePath,
   isRepoUrl,
+  normalizePath,
   normalizeRepoUrl,
   parseBuilds,
   parseByRepo,
   parseHealth,
   parseReleases,
-  parseScan,
   passRate,
   parseSeries,
   releaseBlock,
   rootContaining,
   safeBaseUrl,
+  scannedRepo,
   spark,
   systemPath,
   type ParsedMatch,
@@ -32,7 +34,7 @@ import {
 } from './lib'
 import { OWN_PREFIX, handoffUrl, parseAsk, pickActiveMatch, pushAsk, scrub } from './skills'
 import { ENVIRONMENTS, FIND_CLAUDE, PLUGIN_ID, apiKeysUrl, baseOf, configureInput, environmentOf, extractKey, type EnvironmentId } from './setup'
-import { ALREADY_RUNNING_EXIT, FIND_DEVICE, FIND_NEEDS, FIND_PNX, MIN_PNX, MISSING_RETRY_MS, RETRY_MS, catalogUrlOf, devCycleSteps, endedNote, isAtLeast, isTakingJobs, lineNote, parseDeviceId, parseFind, parseNeeds, sessionEndAction } from './worker'
+import { ALREADY_RUNNING_EXIT, FIND_DEVICE, FIND_NEEDS, FIND_PNX, MIN_PNX, MISSING_RETRY_MS, RETRY_MS, WANT_PNX, catalogUrlOf, devCycleSteps, endedNote, isAtLeast, isTakingJobs, lineNote, parseDeviceId, parseFind, parseNeeds, sessionEndAction } from './worker'
 import type { Ask, Asks, CheckGroup, ClaudeCode, Data, Match, RepoView, Ui } from '../types'
 
 const PANE = 'pnx-context'
@@ -47,8 +49,6 @@ const MAX_MATCHES = 3
 const PAGE_SIZE = 8
 // Width of the label column in the header's two status rows (✓ PlatformNEX, ● Dev cycles), so their values line up.
 const STATUS_LABEL = 16
-// Width of the header's action buttons (⟳, ✓ check), mirrored by an empty column so the title sits in the middle.
-const HEADER_ACTIONS = 20
 
 const EMPTY_DATA: Data = { at: 0, status: 'unconfigured', repos: [] }
 const EMPTY_UI: Ui = {}
@@ -62,13 +62,17 @@ const asks = atom({ plugin: 'pnx-context', key: 'asks' } as const, EMPTY_ASKS, {
 // Whether this machine's Claude Code takes dev-cycle jobs now (one line in the pane), and why the last try stopped (for the check).
 const claudeCode = atom({ plugin: 'pnx-context', key: 'claudeCode' } as const, { status: 'connecting' } as ClaudeCode, { shape: 'claude-code-1' })
 
-// Every repository under the folder the session is in, one line each: folder, remote, branch, short sha.
-const SCAN =
-  'find "$PWD" -maxdepth 3 \\( -name node_modules -o -name .terraform \\) -prune -o -name .git -print 2>/dev/null | head -80 | ' +
-  'while read -r g; do d=$(dirname "$g"); ' +
-  'printf \'%s\\t%s\\t%s\\t%s\\n\' "$d" "$(git -C "$d" remote get-url origin 2>/dev/null)" "$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null)" "$(git -C "$d" rev-parse --short HEAD 2>/dev/null)"; done'
-const ONE =
-  'd="$1"; printf \'%s\\t%s\\t%s\\t%s\\n\' "$d" "$(git -C "$d" remote get-url origin 2>/dev/null)" "$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null)" "$(git -C "$d" rev-parse --short HEAD 2>/dev/null)"'
+// The repository scan: no shell (Windows has no `sh` on PATH), only the file system and `git` itself, which every OS
+// runs directly. A folder holding `.git` (a folder, or a worktree's file) is a repository, looked for two folders deep
+// under the session's folder, as `find -maxdepth 3 -name .git` did.
+const SCAN_DEPTH = 2
+const MAX_REPOS = 80
+// A broad folder (a home folder, a drive) must not hold the refresh: at most this many folders read, for this long.
+const MAX_SCAN_DIRS = 500
+const SCAN_BUDGET_MS = 10_000
+const SCAN_SKIP = new Set(['.git', 'node_modules', '.terraform'])
+// Repositories read by git at once: enough to be quick, few enough not to flood a slow machine.
+const GIT_BATCH = 8
 
 // Held in the module (a hot reload starts them over, which only costs one refresh).
 let scan: { cwd: string; at: number; repos: ScannedRepo[] } | undefined
@@ -140,6 +144,8 @@ const startWorker = async ($: EngineInterface, cfg: Cfg): Promise<void> => {
       nextWorkerTry = now + MISSING_RETRY_MS
       const why = found.cli === undefined ? 'pnx is not installed' : `pnx ${found.version} is too old (needs ${MIN_PNX}+)`
       logWorker($, why)
+      // Tells pnx-fast-dev which pnx is needed, so it checks at every start until it has it, not once a day.
+      await $.process.run(['node', '-e', WANT_PNX], { timeoutMs: 10_000 }).catch(() => undefined)
       await setClaudeCode($, 'offline', why)
 
       return
@@ -189,14 +195,62 @@ const startWorker = async ($: EngineInterface, cfg: Cfg): Promise<void> => {
   }
 }
 
+/**
+ * The folders under `dir` (itself included) that hold `.git`, SCAN_DEPTH folders deep, at most MAX_REPOS. One level at
+ * a time, so the folders right under `dir` (where repositories usually are) are read first; it stops at MAX_SCAN_DIRS
+ * folders read or SCAN_BUDGET_MS, keeping what it found.
+ */
+const findRepos = async ($: EngineInterface, dir: string): Promise<string[]> => {
+  const found: string[] = []
+  const deadline = (await $.clock.now()) + SCAN_BUDGET_MS
+  let reads = 0
+  let level = [normalizePath(dir)]
+  for (let depth = 0; depth <= SCAN_DEPTH && level.length > 0; depth += 1) {
+    const next: string[] = []
+    for (const path of level) {
+      const left = deadline - (await $.clock.now())
+      if (found.length >= MAX_REPOS || reads >= MAX_SCAN_DIRS || left <= 0) return found
+      reads += 1
+      // One read can hang (a cloud-synced or network folder): it gets only the time left, then the search ends there.
+      const stop = new AbortController()
+      const timeUp = $.clock.sleep(left, { signal: stop.signal }).then(() => undefined, () => undefined)
+      // A folder that can't be read (no access, gone meanwhile) is skipped, as find skipped it.
+      const entries = await Promise.race([$.fs.list(path).catch(() => []), timeUp])
+      stop.abort()
+      if (entries === undefined) return found
+      if (entries.some(e => e.name === '.git')) found.push(path)
+      // Symbolic links are `other`, so they are not followed, as find does not follow them.
+      if (depth < SCAN_DEPTH) for (const e of entries) if (e.kind === 'dir' && !SCAN_SKIP.has(e.name)) next.push(`${path === '/' || path.endsWith(':/') ? path : `${path}/`}${e.name}`)
+    }
+    level = next
+  }
+
+  return found
+}
+
+/** One repository's remote, branch and short commit, from git run directly (no shell); a part git can't answer is left out. */
+const readRepo = async ($: EngineInterface, root: string): Promise<ScannedRepo> => {
+  const git = (...args: string[]) =>
+    $.process
+      .run(['git', '-C', root, ...args], { timeoutMs: 10_000 })
+      .then(r => (r.exitCode === 0 ? r.stdout.trim() : ''))
+      .catch(() => '')
+  const [remote, branch, head] = await Promise.all([git('remote', 'get-url', 'origin'), git('rev-parse', '--abbrev-ref', 'HEAD'), git('rev-parse', '--short', 'HEAD')])
+
+  return scannedRepo(root, remote, branch, head)
+}
+
 const discover = async ($: EngineInterface, force: boolean): Promise<{ cwd: string; repos: ScannedRepo[] }> => {
   const cwd = await $.session.cwd()
   const now = await $.clock.now()
   if (!force && scan !== undefined && scan.cwd === cwd && now - scan.at < SCAN_MS) return { cwd, repos: scan.repos }
 
+  // In a repository, only that one; else every repository under the folder.
   const repo = await $.session.repo()
-  const ran = await $.process.run(repo === null ? ['sh', '-c', SCAN] : ['sh', '-c', ONE, 'sh', repo.root], { timeoutMs: 20_000 }).catch(() => undefined)
-  const repos = dedupeByRemote(ran === undefined ? [] : parseScan(ran.stdout), cwd)
+  const roots = repo === null ? await findRepos($, cwd) : [repo.root]
+  const found: ScannedRepo[] = []
+  for (let i = 0; i < roots.length; i += GIT_BATCH) found.push(...(await Promise.all(roots.slice(i, i + GIT_BATCH).map(root => readRepo($, root)))))
+  const repos = dedupeByRemote(found, cwd)
   scan = { cwd, at: now, repos }
 
   return { cwd, repos }
@@ -215,7 +269,7 @@ const lookup = async ($: EngineInterface, cfg: Cfg, remote: string, force: boole
 
     return entry
   } catch (error) {
-    const entry = { at: now, failed: error instanceof ApiFailure && error.status === 404 ? 'this PlatformNEX does not have the repo lookup yet' : failure(error) }
+    const entry = { at: now, failed: error instanceof ApiFailure && error.status === 404 ? "this PlatformNEX can't look up repos yet" : failure(error) }
     if (started === connection) lookups.set(key, entry)
 
     return entry
@@ -261,15 +315,24 @@ const loadDetail = async ($: EngineInterface, cfg: Cfg, match: ParsedMatch, forc
   return out
 }
 
+// "refreshing…" in the pane, worked out when the write is applied, not when it was asked for: a refresh running or one
+// waiting. So writes that land out of order still end on what is true, and the last refresh's own write clears it.
+const showRefreshing = ($: EngineInterface) => update($, ui, u => ({ ...u, isRefreshing: isBusy || queued !== undefined })).catch(() => undefined)
+
 const refresh = async ($: EngineInterface, cfg: Cfg | undefined, force: boolean): Promise<void> => {
   if (isBusy) {
-    // A tick can wait for the next one; a forced refresh (a new connection, say) must not be lost.
-    if (force) queued = { cfg, at: connection }
+    // A tick can wait for the next one; a forced refresh (a new connection, ⟳) must not be lost, and shows as waiting.
+    if (force) {
+      queued = { cfg, at: connection }
+      await showRefreshing($)
+    }
 
     return
   }
   isBusy = true
   const started = connection
+  // The pane says "refreshing…" until this ends, so a ⟳ press shows at once even when nothing on screen changes.
+  await showRefreshing($)
   try {
     const now = await $.clock.now()
     if (cfg === undefined) {
@@ -327,6 +390,7 @@ const refresh = async ($: EngineInterface, cfg: Cfg | undefined, force: boolean)
     const next = queued
     queued = undefined
     if (next !== undefined && next.at === connection) void refresh($, next.cfg, true)
+    else await showRefreshing($)
   }
 }
 
@@ -342,7 +406,7 @@ const saveKey = async ($: EngineInterface, pasted: string, env: EnvironmentId, p
   await update($, ui, u => ({ ...u, setupDone: [] }))
   const key = extractKey(pasted)
   if (key === undefined) {
-    await setupNote($, "That doesn't look like a PlatformNEX key (it starts with pnx_). Copy it again from the portal.", 'error')
+    await setupNote($, "That doesn't look like a PlatformNEX key (it starts with pnx_). Copy it again.", 'error')
 
     return false
   }
@@ -380,7 +444,7 @@ const saveKey = async ($: EngineInterface, pasted: string, env: EnvironmentId, p
 
     return true
   } catch (error) {
-    await setupNote($, `Could not finish setup: ${error instanceof Error ? lineNote(error.message) ?? 'unknown error' : 'unknown error'}`, 'error')
+    await setupNote($, `Setup didn't finish: ${error instanceof Error ? lineNote(error.message) ?? 'unknown error' : 'unknown error'}`, 'error')
 
     return false
   }
@@ -566,7 +630,7 @@ const formatSteps = (steps: CheckStep[]): string =>
 const checkText = async ($: EngineInterface, options: Options): Promise<string> => {
   const r = await checkResult($, options)
   const all = [...r.key, ...r.lookup]
-  const summary = ['PlatformNEX check', '', formatSteps(all), '', r.isReady ? 'Ready. Open the pane with /pnx-context.' : 'Not ready yet: fix the first ✗ above, restart Claude Code, then run /pnx-context check again.']
+  const summary = ['PlatformNEX check', '', formatSteps(all), '', r.isReady ? 'Ready. Open the pane with /pnx-context.' : 'Not ready yet: fix the first ✗ above, then run /pnx-context check again.']
 
   return (r.dev === undefined ? summary : [...summary, '', 'Dev cycles', formatSteps(r.dev), ...(r.isRetrying ? ['  · connecting now'] : [])]).join('\n')
 }
@@ -580,7 +644,7 @@ const checkResult = async ($: EngineInterface, options: Options): Promise<CheckR
   const base = safeBaseUrl(url)
   const steps: CheckStep[] = [
     { label: 'URL set', ok: url !== '', detail: url === '' ? 'not set' : url, fix: url === '' ? 'run /pnx-context setup' : undefined },
-    { label: 'URL is https', ok: url === '' ? undefined : base !== undefined, detail: base !== undefined ? 'yes' : url === '' ? 'skipped' : 'it must look like https://host, with no path', fix: url !== '' && base === undefined ? 'set the baseUrl option again' : undefined },
+    { label: 'URL is https', ok: url === '' ? undefined : base !== undefined, detail: base !== undefined ? 'yes' : url === '' ? 'skipped' : 'it must look like https://host, with no path', fix: url !== '' && base === undefined ? 'run /pnx-context setup' : undefined },
     { label: 'API key set', ok: key !== '', detail: key === '' ? 'not set' : '(hidden)', fix: key === '' ? 'run /pnx-context setup' : undefined },
     { label: 'key format', ok: key === '' ? undefined : key.startsWith('pnx_'), detail: key === '' ? 'skipped' : key.startsWith('pnx_') ? 'looks right' : 'a personal key starts with pnx_', fix: key !== '' && !key.startsWith('pnx_') ? 'create a key in the portal (user menu, API keys)' : undefined },
   ]
@@ -626,7 +690,7 @@ const runCheck = async ($: EngineInterface, options: Options): Promise<void> => 
     // A check of a connection dropped meanwhile is not this one's: the pane shows none rather than that.
     await update($, ui, u => ({ ...u, check: started === connection ? { groups, isReady: r.isReady } : undefined }))
   } catch {
-    await update($, ui, u => ({ ...u, check: started === connection ? { groups: [], isReady: false, note: 'Could not run the check.' } : undefined }))
+    await update($, ui, u => ({ ...u, check: started === connection ? { groups: [], isReady: false, note: "The check couldn't run. Press k to try again." } : undefined }))
   }
 }
 
@@ -743,7 +807,7 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     try {
       const path = (e as unknown as { file_path?: unknown }).file_path
-      if (typeof path === 'string' && path.startsWith('/')) {
+      if (typeof path === 'string' && isAbsolutePath(path)) {
         const root = rootContaining(path, (await read($, data)).repos.map(r => r.root))
         if (root !== undefined && root !== (await read($, ui)).touchedRoot) await update($, ui, u => ({ ...u, touchedRoot: root }))
       }
@@ -759,7 +823,6 @@ export const register: Register = (on, options) => {
     // The terminal draws a Button's hotkey itself (`k: check`) and a link's address under its label; elsewhere neither
     // is drawn, so the hotkey goes in the label and a link keeps a short label.
     const isTerminal = e.surface === 'terminal'
-    const hint = (label: string, key: string): string => (isTerminal ? label : `${label} (${key})`)
     const lead = (key: string, label: string): string => (isTerminal ? label : `${key} ${label}`)
     // The saved settings, or the key just saved from this pane.
     const cfg = activeCfg()
@@ -940,7 +1003,7 @@ export const register: Register = (on, options) => {
       // The environment picked here, else the key's or the saved address's, else production.
       const env: EnvironmentId = u.setupEnv ?? environmentOf(cfg?.base ?? safeBaseUrl(urlOf(options))) ?? 'prod'
       const why = isKeyRefused
-        ? `${labelOf(cfg.base)} didn't accept the saved API key (revoked or expired?). Create a new one and paste it here.`
+        ? `Your API key no longer works on ${labelOf(cfg.base)} (expired or revoked). Create a new one and paste it here.`
         : isSavedKeyMalformed
           ? "The saved API key isn't a PlatformNEX key (it starts with pnx_). Paste a new one."
           : undefined
@@ -1098,17 +1161,15 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column">
-        {/* Header: the title in the middle (an empty column on the left as wide as the buttons on the right), then the
-            connection, then under a rule the repository in view. */}
-        <Box flexDirection="row">
-          <Box width={HEADER_ACTIONS} />
-          <Box flexGrow={1} justifyContent="center">
-            <Text bold>PLATFORMNEX</Text>
-          </Box>
-          <Box width={HEADER_ACTIONS} flexDirection="row" justifyContent="flex-end" gap={1}>
+        {/* Header: the title on the left, icon buttons on the right (one row at any width); then the connection, then
+            under a rule the repository in view. */}
+        <Box flexDirection="row" justifyContent="space-between">
+          <Text bold>PLATFORMNEX</Text>
+          <Box flexDirection="row" gap={1}>
             <Button
               key="refresh"
               plain
+              dimColor={u.isRefreshing === true}
               hotkey="r"
               onPress={act(async () => {
                 // A fresh connection: sign in again with the key (a refused one goes back to setup) and read everything
@@ -1134,27 +1195,27 @@ export const register: Register = (on, options) => {
                 await runCheck($, checkOptions())
               })}
             >
-              {hint('✓ check', 'k')}
+              ✓
             </Button>
+            {u.connOpen !== true && (
+              <Button
+                key="conn-open"
+                plain
+                hotkey="s"
+                onPress={act(() => update($, ui, x => ({ ...x, connOpen: true, confirmDisconnect: false, check: undefined, setupEnv: undefined, setupNote: undefined, setupDone: undefined })))}
+              >
+                ⚙
+              </Button>
+            )}
           </Box>
         </Box>
+        {/* The terminal draws each hotkey beside its icon (r: ⟳); elsewhere one dim line says what the icons do. */}
+        {!isTerminal && <Text dimColor>{cap(`r refresh · k check${u.connOpen === true ? '' : ' · s change'}`, columns)}</Text>}
         {/* Two things that can fail apart: Claude Code reaching PlatformNEX with the key, and PlatformNEX reaching this
             Claude Code for dev-cycle jobs. Neither depends on the repository. */}
-        <Box flexDirection="row" justifyContent="space-between">
-          <Box flexDirection="row">
-            <Text color="success">{'✓ PlatformNEX'.padEnd(STATUS_LABEL)}</Text>
-            <Text color="success">{cap(`connected to ${envLabel}`, Math.max(8, columns - STATUS_LABEL - 12))}</Text>
-          </Box>
-          {u.connOpen !== true && (
-            <Button
-              key="conn-open"
-              plain
-              hotkey="s"
-              onPress={act(() => update($, ui, x => ({ ...x, connOpen: true, confirmDisconnect: false, check: undefined, setupEnv: undefined, setupNote: undefined, setupDone: undefined })))}
-            >
-              {hint('change', 's')}
-            </Button>
-          )}
+        <Box flexDirection="row">
+          <Text color="success">{'✓ PlatformNEX'.padEnd(STATUS_LABEL)}</Text>
+          <Text color="success">{cap(`connected to ${envLabel}`, Math.max(8, columns - STATUS_LABEL))}</Text>
         </Box>
         {d.status === 'error' && d.error !== undefined && <Text color="error">{cap(d.error, columns * 2)}</Text>}
         {options['devCycles'] !== 'off' && (
@@ -1175,7 +1236,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column" alignItems="center">
           <Text dimColor>
             {cap(
-              `${active === undefined ? '' : `${active.name}${active.branch === undefined ? '' : ` · ${cap(active.branch, 30)}`} · `}${matched} of ${d.repos.length} repos · ${ago(d.at, now)}`,
+              `${active === undefined ? '' : `${active.name}${active.branch === undefined ? '' : ` · ${cap(active.branch, 30)}`} · `}${matched} of ${d.repos.length} repos · ${u.isRefreshing === true ? 'refreshing…' : `updated ${ago(d.at, now)}`}`,
               columns * 2,
             )}
           </Text>
@@ -1393,7 +1454,7 @@ export const register: Register = (on, options) => {
 
         {active === undefined && d.repos.length === 0 && <Text dimColor>No git repository found here.</Text>}
         {active !== undefined && active.lookup === 'none' && <Text dimColor>Not in the PlatformNEX catalog, or not visible to you.</Text>}
-        {active !== undefined && active.lookup === 'error' && <Text color="error">Could not look this repository up.</Text>}
+        {active !== undefined && active.lookup === 'error' && <Text color="error">Couldn't look up this repo. Press ⟳ to try again.</Text>}
 
         {current !== undefined && active !== undefined && (
           <Box flexDirection="column">

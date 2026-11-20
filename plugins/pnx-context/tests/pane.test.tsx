@@ -42,6 +42,9 @@ const json = (body: unknown, status = 200) => ({ value: { status, ok: status >= 
 
 type Sent = { url: string; method: string; headers: Record<string, string>; body?: string }
 
+// A folder as the stub compares it: forward slashes, lower-case drive, no trailing slash (as the plugin keeps it).
+const same = (path: string): string => path.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, d: string) => `${d.toLowerCase()}:`).replace(/\/+$/, '')
+
 /** Stubs what sits beneath the mod: the host's network, shell and repo. Records every request. */
 const stubWorld = (
   on: On,
@@ -62,6 +65,8 @@ const stubWorld = (
     findPnx?: { stdout: string; until: Promise<void> }
     /** Every process the plugin starts (pnx), recorded and refused. */
     spawned?: (readonly string[])[]
+    /** The repository the session is in, as Claude Code names it (`C:\w\gateway` on Windows); absent, none. */
+    inRepo?: string
   } = {},
 ) => {
   let tokens = 0
@@ -77,9 +82,38 @@ const stubWorld = (
   on('ui.status', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: '/w/gateway' }))
-  on('session.repo', () => ({ value: { root: '/w/gateway', remote: 'x', internal: false, name: null } }))
+  // The repositories on disk, from `scan`'s lines (folder, remote, branch, short sha): the folders listed and git's answers.
+  const repos = (opts.scan ?? SCAN)
+    .split('\n')
+    .filter(line => line.trim() !== '')
+    .map(line => {
+      const [root = '', remote = '', branch = '', head = ''] = line.split('\t')
+
+      return { root: same(root), remote, branch, head }
+    })
+  // Not in a repository unless `inRepo` names one: the plugin then looks through the folders.
+  on('session.repo', async () => {
+    // Every scan asks this first, once.
+    if (++scans === opts.holdScan?.scan) await opts.holdScan.until
+
+    return { value: opts.inRepo === undefined ? null : { root: opts.inRepo, remote: 'x', internal: false, name: null } }
+  })
+  on('fs.list', (_, e) => {
+    const dir = same(e.path)
+    const under = (root: string) => (root.startsWith(`${dir}/`) ? root.slice(dir.length + 1).split('/')[0] : undefined)
+    const names = [...new Set(repos.map(r => under(r.root)).filter((n): n is string => n !== undefined))]
+    const entry = (name: string) => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })
+
+    return { value: [...(repos.some(r => r.root === dir) ? [entry('.git')] : []), ...names.map(entry)] }
+  })
   on('process.run', async (_, e) => {
-    if (e.argv[0] === 'sh' && ++scans === opts.holdScan?.scan) await opts.holdScan.until
+    if (e.argv[0] === 'git') {
+      const repo = repos.find(r => r.root === same(e.argv[2] ?? ''))
+      const args = e.argv.slice(3).join(' ')
+      const out = repo === undefined ? undefined : args === 'remote get-url origin' ? repo.remote : args === 'rev-parse --abbrev-ref HEAD' ? repo.branch : args === 'rev-parse --short HEAD' ? repo.head : undefined
+
+      return { value: { exitCode: out === undefined || out === '' ? 128 : 0, stdout: out === undefined ? '' : `${out}\n`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (opts.findPnx !== undefined && e.argv[2] === FIND_PNX) {
       await opts.findPnx.until
 
@@ -283,8 +317,8 @@ test('/pnx-context check says when the server has no repo lookup yet', { options
   const { text = '' } = await $.command.run({ command: 'pnx-context', args: 'check', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
 
   expect(text).toMatch(/✓ key accepted/)
-  expect(text).toMatch(/✗ lookup route\s+this PlatformNEX does not have the repo lookup yet/)
-  expect(text).toMatch(/ask the platform team to deploy the by-repo route/)
+  expect(text).toMatch(/✗ lookup route\s+this PlatformNEX can't look up repos yet/)
+  expect(text).toMatch(/ask the PlatformNEX team, or switch environment/)
   expect(text).toMatch(/Not ready yet/)
 })
 
@@ -296,7 +330,7 @@ test('/pnx-context check names a key that was not accepted and skips the rest', 
   const { text = '' } = await $.command.run({ command: 'pnx-context', args: 'check', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
 
   expect(text).toMatch(/✗ key accepted\s+the API key was not accepted/)
-  expect(text).toMatch(/create a new key in the portal/)
+  expect(text).toMatch(/create a new key in the portal and paste it in the pane/)
   expect(text).toMatch(/· lookup route\s+skipped/)
   expect(text).not.toContain(KEY)
 })
@@ -321,7 +355,7 @@ test('the pane says the server has no repo lookup yet, not just "not found"', { 
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
 
-  expect((await ui.find({ type: 'Text', text: /does not have the repo lookup yet/ }))?.text).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /can't look up repos yet/ }))?.text).toBeDefined()
   await ui.unmount()
 })
 
@@ -339,9 +373,10 @@ test('a folder with many repositories lists them a page at a time, and a reposit
   const sent: Sent[] = []
   const scan = Array.from({ length: 10 }, (_, i) => `/w/r${i}\thttps://github.com/ivedha-tech/r${i}.git\tmain\tabc123${i}\n`).join('')
   stubWorld(on, sent, { scan })
-  on('session.cwd', () => ({ value: '/w/r0' }))
+  // The folder holding them, not one of them: in a repository only that one is read.
+  on('session.cwd', () => ({ value: '/w' }))
 
-  await $.session.start({ cwd: '/w/r0', surface: 'terminal', isInteractive: true })
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
 
@@ -511,7 +546,7 @@ test('a key PlatformNEX refuses goes back to setup even with no repository to lo
   // The key was tried (one sign-in) even though there was nothing to look up.
   expect(sent.some(r => r.url === `${BASE}/api/catalog/auth/api-key-token`)).toBe(true)
   expect((await ui.find({ type: 'Text', text: /SET UP PLATFORMNEX/ }))?.text).toBe('SET UP PLATFORMNEX')
-  expect((await ui.find({ type: 'Text', text: /didn't accept the saved API key/ }))?.text).toMatch(/portal\.example\.test didn't accept the saved API key/)
+  expect((await ui.find({ type: 'Text', text: /no longer works/ }))?.text).toMatch(/Your API key no longer works on portal\.example\.test/)
   expect(await ui.find({ type: 'Text', text: /^connected to / })).toBeUndefined()
   await ui.unmount()
 })
@@ -551,7 +586,33 @@ test('refresh (r) is a fresh connection: it signs in again and reads everything 
   await ui.unmount()
 })
 
-test('the terminal draws hotkeys itself, so labels carry them only on other surfaces', { options: OPTIONS }, async ($, on) => {
+test('⟳ says "refreshing…" until the refresh ends, then when the pane last updated', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  let release = () => {}
+  const until = new Promise<void>(resolve => {
+    release = resolve
+  })
+  // The second scan is the ⟳ below: held, so the pane is seen mid-refresh.
+  stubWorld(on, sent, { holdScan: { scan: 2, until } })
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'vscode' })
+  const repoLine = async () => (await ui.find({ type: 'Text', text: /repos ·/ }))?.text
+  expect(await repoLine()).toMatch(/repos · updated just now$/)
+
+  await ui.press({ key: 'refresh' })
+  await clock.settle()
+  expect(await repoLine()).toMatch(/repos · refreshing…$/)
+
+  release()
+  await clock.settle()
+  expect(await repoLine()).toMatch(/repos · updated just now$/)
+  await ui.unmount()
+})
+
+test('the header buttons are icons; the hotkey line shows only where the surface does not draw hotkeys', { options: OPTIONS }, async ($, on) => {
   const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
   const sent: Sent[] = []
   stubWorld(on, sent)
@@ -559,14 +620,22 @@ test('the terminal draws hotkeys itself, so labels carry them only on other surf
   await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
   await clock.settle()
 
-  const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect((await term.find({ key: 'check' }))?.text).toBe('✓ check')
-  expect((await term.find({ key: 'conn-open' }))?.text).toBe('change')
-  await term.unmount()
+  for (const surface of ['terminal', 'vscode'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect((await ui.find({ key: 'refresh' }))?.text).toBe('⟳')
+    expect((await ui.find({ key: 'check' }))?.text).toBe('✓')
+    expect((await ui.find({ key: 'conn-open' }))?.text).toBe('⚙')
+    const legend = await ui.find({ type: 'Text', text: /^r refresh · k check · s change$/ })
+    if (surface === 'terminal') expect(legend).toBeUndefined()
+    else expect(legend).toBeDefined()
+    await ui.unmount()
+  }
 
+  // With the CONNECTION panel open ⚙ is hidden, so the line doesn't offer it either.
   const code = await $.ui.mount({ ...PANE, surface: 'vscode' })
-  expect((await code.find({ key: 'check' }))?.text).toBe('✓ check (k)')
-  expect((await code.find({ key: 'conn-open' }))?.text).toBe('change (s)')
+  await code.press({ key: 'conn-open' })
+  expect(await code.find({ key: 'conn-open' })).toBeUndefined()
+  expect((await code.find({ type: 'Text', text: /^r refresh · k check/ }))?.text).toBe('r refresh · k check')
   await code.unmount()
 })
 
@@ -683,6 +752,72 @@ test('without a component the colour key is not shown', { options: OPTIONS }, as
   expect((await ui.find({ type: 'Text', text: /^connected to / }))?.text).toBe('connected to portal.example.test')
   expect(await ui.find({ type: 'Text', text: /^health$/ })).toBeUndefined()
   await ui.unmount()
+})
+
+test('on Windows the repository you are in is found and shown, with no shell', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  const ran: (readonly string[])[] = []
+  stubWorld(on, sent, { inRepo: 'C:\\w\\gateway', scan: 'C:\\w\\gateway\thttps://github.com/ivedha-tech/gateway.git\tfeat/x\tabc1234\n' })
+  on('session.cwd', () => ({ value: 'C:\\w\\gateway\\src' }))
+  on('process.run', async (_, e, next) => {
+    ran.push(e.argv)
+
+    return next(e)
+  })
+
+  await $.session.start({ cwd: 'C:\\w\\gateway\\src', surface: 'vscode', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'vscode' })
+
+  expect((await ui.find({ type: 'Text', text: /repos ·/ }))?.text).toMatch(/^gateway · feat\/x · 1 of 1 repos · /)
+  expect((await ui.find({ type: 'Text', text: /^GATEWAY$/ }))?.text).toBe('GATEWAY')
+  // git is run directly, never through sh.
+  expect(ran.some(argv => argv[0] === 'sh')).toBe(false)
+  await ui.unmount()
+})
+
+test('on Windows the repositories under the folder are found by listing it', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  const scan = ['a', 'b'].map(n => `C:\\w\\${n}\thttps://github.com/ivedha-tech/${n}.git\tmain\tabc123\n`).join('')
+  stubWorld(on, sent, { scan })
+  on('session.cwd', () => ({ value: 'C:\\w' }))
+
+  await $.session.start({ cwd: 'C:\\w', surface: 'vscode', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'vscode' })
+
+  expect((await ui.find({ type: 'Text', text: /repos ·/ }))?.text).toMatch(/of 2 repos/)
+  await ui.unmount()
+})
+
+test('a very broad folder is searched only so far, so a refresh never hangs on it', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  stubWorld(on, sent, { scan: '' })
+  // Every folder holds 40 more (a home folder or a drive): 1 + 40 + 1600 folders two levels deep.
+  let reads = 0
+  let most = 0
+  on('session.repo', async (_, e, next) => {
+    // Each scan asks this first: count its folder reads on their own.
+    reads = 0
+
+    return next(e)
+  })
+  on('fs.list', () => {
+    reads += 1
+    most = Math.max(most, reads)
+
+    return { value: Array.from({ length: 40 }, (_, i) => ({ name: `d${i}`, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })) }
+  })
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+
+  // Every folder one level down was read (repositories are usually there), and the search stopped at its cap.
+  expect(most).toBeGreaterThan(41)
+  expect(most).toBeLessThanOrEqual(500)
 })
 
 test('a refresh still running for the old connection never shows its data after a switch', { options: OPTIONS }, async ($, on) => {

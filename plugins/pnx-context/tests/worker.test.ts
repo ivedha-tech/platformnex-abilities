@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { ALREADY_RUNNING_EXIT, MIN_PNX, catalogUrlOf, devCycleSteps, endedNote, isAtLeast, isTakingJobs, lineNote, parseDeviceId, parseFind, parseNeeds, sessionEndAction, type Needs } from '../hooks/worker'
+import { ALREADY_RUNNING_EXIT, MIN_PNX, WANT_PNX, catalogUrlOf, devCycleSteps, endedNote, isAtLeast, isTakingJobs, lineNote, parseDeviceId, parseFind, parseNeeds, sessionEndAction, type Needs } from '../hooks/worker'
 
 test('finds pnx from what the node lookup printed, and needs a new enough one', () => {
   expect(parseFind('{"cli":"C:\\\\npm\\\\node_modules\\\\@platformnex\\\\pnx\\\\dist\\\\cli.js","version":"0.1.18"}')).toEqual({ cli: 'C:\\npm\\node_modules\\@platformnex\\pnx\\dist\\cli.js', version: '0.1.18' })
@@ -33,7 +33,7 @@ test('says why it stopped, for the debug log: another window has it, or the last
   expect(endedNote(null, undefined)).toMatch(/exit signal/)
 })
 
-const ALL_SET: Needs = { node: '22.3.0', git: true, gh: true, ghSignedIn: true, fastDevRan: true, problem: '' }
+const ALL_SET: Needs = { node: '22.3.0', git: true, gh: true, ghSignedIn: true, fastDevRan: true, problem: '', released: '' }
 const PNX = { cli: '/npm/@platformnex/pnx/dist/cli.js', version: MIN_PNX }
 
 test('reads what the needs lookup printed; nothing printed means no Node', () => {
@@ -53,14 +53,40 @@ test('when offline, the check names each missing thing with its fix', () => {
     devCycleSteps({ isOff: false, status: 'offline', needs: { ...ALL_SET, ...needs }, pnx }).filter(s => s.ok === false).map(s => s.fix)
   expect(fixOf({})).toEqual([])
   expect(fixOf({ node: '18.19.0' })[0]).toMatch(/Node.js 20/)
-  expect(fixOf({ fastDevRan: false }, {})[0]).toMatch(/pnx-fast-dev Ability/)
-  expect(fixOf({ problem: 'auth' }, {})[0]).toMatch(/gcloud auth application-default login/)
-  expect(fixOf({ problem: 'access' }, {})[0]).toMatch(/admin/)
-  expect(fixOf({}, { cli: PNX.cli, version: '0.1.17' })[0]).toContain('npm i -g @platformnex/pnx')
+  expect(fixOf({ fastDevRan: false }, {})[0]).toMatch(/pnx-fast-dev plugin/)
+  expect(fixOf({ problem: 'auth' }, {})[0]).toMatch(/gcloud auth login, then gcloud auth application-default login/)
+  // No access is first a sign-in to check (often the wrong account), and only then an admin.
+  expect(fixOf({ problem: 'access' }, {})[0]).toMatch(/work Google account.*admin/)
+  expect(fixOf({ problem: 'network' }, {})[0]).toMatch(/internet or VPN/)
+  expect(fixOf({ problem: 'install' }, {})[0]).toMatch(/didn't install.*install\.log/)
+  // pnx-fast-dev updates at the next start (the wanted file lifts its daily wait): no command that a stale token refuses.
+  expect(fixOf({}, { cli: PNX.cli, version: '0.1.17' })[0]).toBe('it updates by itself: restart Claude Code')
+  // The registry has nothing new enough: no install helps, so it says so instead of "update".
+  expect(fixOf({ released: '0.1.17' }, { cli: PNX.cli, version: '0.1.17' })[0]).toBe(`pnx ${MIN_PNX} isn't released yet; it installs by itself once it is`)
+  expect(fixOf({ released: '0.1.17', problem: 'auth' }, {})[0]).toMatch(/isn't released yet/)
+  expect(fixOf({ released: MIN_PNX }, { cli: PNX.cli, version: '0.1.17' })[0]).toBe('it updates by itself: restart Claude Code')
   expect(fixOf({ git: false })[0]).toMatch(/install git/)
   expect(fixOf({ gh: false, ghSignedIn: false })[0]).toMatch(/GitHub CLI/)
   expect(fixOf({ ghSignedIn: false })[0]).toBe('run: gh auth login')
-  expect(devCycleSteps({ isOff: false, status: 'offline', note: 'the API key was not accepted', needs: ALL_SET, pnx: PNX }).pop()).toEqual({ label: 'last try', ok: undefined, detail: 'the API key was not accepted' })
+})
+
+test('"last try" shows why the worker stopped, unless Node.js or pnx failing already says it', () => {
+  const lastTry = (needs: Partial<Needs>, pnx: { cli?: string; version?: string } = PNX) =>
+    devCycleSteps({ isOff: false, status: 'offline', note: 'the API key was not accepted', needs: { ...ALL_SET, ...needs }, pnx }).find(s => s.label === 'last try')
+  expect(lastTry({})).toEqual({ label: 'last try', ok: undefined, detail: 'the API key was not accepted' })
+  // git and gh never stop the worker: the real reason stays.
+  expect(lastTry({ ghSignedIn: false })?.detail).toBe('the API key was not accepted')
+  expect(lastTry({ gh: false, git: false })?.detail).toBe('the API key was not accepted')
+  // Node.js or pnx failing is the reason, said above; an older note would only contradict it.
+  expect(lastTry({}, { cli: PNX.cli, version: '0.1.17' })).toBeUndefined()
+  expect(lastTry({}, {})).toBeUndefined()
+  expect(lastTry({ node: '18.19.0' })).toBeUndefined()
+})
+
+test('asks pnx-fast-dev for the pnx dev cycles need, in pnx\'s own folder', () => {
+  expect(WANT_PNX).toContain(`'${MIN_PNX}'`)
+  expect(WANT_PNX).toContain('.ensure-wanted')
+  expect(WANT_PNX).toContain('PNX_CONFIG_DIR')
 })
 
 test('takes the device id pnx saved, only for this PlatformNEX', () => {
