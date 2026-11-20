@@ -317,7 +317,7 @@ test('/pnx-context check says when the server has no repo lookup yet', { options
   const { text = '' } = await $.command.run({ command: 'pnx-context', args: 'check', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
 
   expect(text).toMatch(/✓ key accepted/)
-  expect(text).toMatch(/✗ lookup route\s+this PlatformNEX does not have the repo lookup yet/)
+  expect(text).toMatch(/✗ lookup route\s+this PlatformNEX can't look up repos yet/)
   expect(text).toMatch(/ask the platform team to deploy the by-repo route/)
   expect(text).toMatch(/Not ready yet/)
 })
@@ -330,7 +330,7 @@ test('/pnx-context check names a key that was not accepted and skips the rest', 
   const { text = '' } = await $.command.run({ command: 'pnx-context', args: 'check', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
 
   expect(text).toMatch(/✗ key accepted\s+the API key was not accepted/)
-  expect(text).toMatch(/create a new key in the portal/)
+  expect(text).toMatch(/create a new key in the portal and paste it in the pane/)
   expect(text).toMatch(/· lookup route\s+skipped/)
   expect(text).not.toContain(KEY)
 })
@@ -355,7 +355,7 @@ test('the pane says the server has no repo lookup yet, not just "not found"', { 
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
 
-  expect((await ui.find({ type: 'Text', text: /does not have the repo lookup yet/ }))?.text).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /can't look up repos yet/ }))?.text).toBeDefined()
   await ui.unmount()
 })
 
@@ -546,7 +546,7 @@ test('a key PlatformNEX refuses goes back to setup even with no repository to lo
   // The key was tried (one sign-in) even though there was nothing to look up.
   expect(sent.some(r => r.url === `${BASE}/api/catalog/auth/api-key-token`)).toBe(true)
   expect((await ui.find({ type: 'Text', text: /SET UP PLATFORMNEX/ }))?.text).toBe('SET UP PLATFORMNEX')
-  expect((await ui.find({ type: 'Text', text: /didn't accept the saved API key/ }))?.text).toMatch(/portal\.example\.test didn't accept the saved API key/)
+  expect((await ui.find({ type: 'Text', text: /no longer works/ }))?.text).toMatch(/Your API key no longer works on portal\.example\.test/)
   expect(await ui.find({ type: 'Text', text: /^connected to / })).toBeUndefined()
   await ui.unmount()
 })
@@ -586,6 +586,32 @@ test('refresh (r) is a fresh connection: it signs in again and reads everything 
   await ui.unmount()
 })
 
+test('⟳ says "refreshing…" until the refresh ends, then when the pane last updated', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  let release = () => {}
+  const until = new Promise<void>(resolve => {
+    release = resolve
+  })
+  // The second scan is the ⟳ below: held, so the pane is seen mid-refresh.
+  stubWorld(on, sent, { holdScan: { scan: 2, until } })
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'vscode' })
+  const repoLine = async () => (await ui.find({ type: 'Text', text: /repos ·/ }))?.text
+  expect(await repoLine()).toMatch(/repos · updated just now$/)
+
+  await ui.press({ key: 'refresh' })
+  await clock.settle()
+  expect(await repoLine()).toMatch(/repos · refreshing…$/)
+
+  release()
+  await clock.settle()
+  expect(await repoLine()).toMatch(/repos · updated just now$/)
+  await ui.unmount()
+})
+
 test('the header buttons are icons; the hotkey line shows only where the surface does not draw hotkeys', { options: OPTIONS }, async ($, on) => {
   const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
   const sent: Sent[] = []
@@ -604,6 +630,13 @@ test('the header buttons are icons; the hotkey line shows only where the surface
     else expect(legend).toBeDefined()
     await ui.unmount()
   }
+
+  // With the CONNECTION panel open ⚙ is hidden, so the line doesn't offer it either.
+  const code = await $.ui.mount({ ...PANE, surface: 'vscode' })
+  await code.press({ key: 'conn-open' })
+  expect(await code.find({ key: 'conn-open' })).toBeUndefined()
+  expect((await code.find({ type: 'Text', text: /^r refresh · k check/ }))?.text).toBe('r refresh · k check')
+  await code.unmount()
 })
 
 test('in the terminal the key sits in a box with a connect button beside it, and the button connects', async ($, on) => {

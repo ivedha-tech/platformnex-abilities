@@ -102,12 +102,23 @@ export const FIND_NEEDS = [
   "const cp=require('child_process'),p=require('path'),f=require('fs'),o=require('os');",
   "const ok=c=>{try{cp.execSync(c,{stdio:'ignore',timeout:10000});return true}catch{return false}};",
   PNX_DIR,
-  "let problem='';try{problem=f.readFileSync(p.join(d,'.ensure-problem'),'utf8').trim()}catch{}",
+  "const read=n=>{try{return f.readFileSync(p.join(d,n),'utf8').trim()}catch{return ''}};",
   "const gh=ok('gh --version');",
-  "process.stdout.write(JSON.stringify({node:process.versions.node,git:ok('git --version'),gh,ghSignedIn:gh&&ok('gh auth status'),fastDevRan:f.existsSync(p.join(d,'.ensure-checked')),problem}))",
+  "process.stdout.write(JSON.stringify({node:process.versions.node,git:ok('git --version'),gh,ghSignedIn:gh&&ok('gh auth status'),fastDevRan:f.existsSync(p.join(d,'.ensure-checked')),problem:read('.ensure-problem'),released:read('.ensure-latest')}))",
 ].join('')
 
-export type Needs = { node: string; git: boolean; gh: boolean; ghSignedIn: boolean; fastDevRan: boolean; problem: string }
+/**
+ * Run with `node -e`: tells pnx-fast-dev the pnx dev cycles need (`.ensure-wanted`). Until it has it, pnx-fast-dev
+ * checks at every Claude Code start instead of once a day, so an update or a release arrives at the next start.
+ */
+export const WANT_PNX = [
+  "const p=require('path'),f=require('fs'),o=require('os');",
+  PNX_DIR,
+  `try{f.mkdirSync(d,{recursive:true});f.writeFileSync(p.join(d,'.ensure-wanted'),'${MIN_PNX}')}catch{}`,
+].join('')
+
+/** `released`: the newest pnx the registry had at pnx-fast-dev's last try, '' when unknown. */
+export type Needs = { node: string; git: boolean; gh: boolean; ghSignedIn: boolean; fastDevRan: boolean; problem: string; released: string }
 
 /** What FIND_NEEDS printed, or undefined when it did not run (no Node). */
 export function parseNeeds(stdout: string | undefined): Needs | undefined {
@@ -115,21 +126,30 @@ export function parseNeeds(stdout: string | undefined): Needs | undefined {
     const o = JSON.parse(stdout ?? '') as Record<string, unknown>
     if (typeof o['node'] !== 'string') return undefined
 
-    return { node: o['node'], git: o['git'] === true, gh: o['gh'] === true, ghSignedIn: o['ghSignedIn'] === true, fastDevRan: o['fastDevRan'] === true, problem: typeof o['problem'] === 'string' ? o['problem'] : '' }
+    const text = (k: string) => (typeof o[k] === 'string' ? (o[k] as string) : '')
+
+    return { node: o['node'], git: o['git'] === true, gh: o['gh'] === true, ghSignedIn: o['ghSignedIn'] === true, fastDevRan: o['fastDevRan'] === true, problem: text('problem'), released: text('released') }
   } catch {
     return undefined
   }
 }
 
-const NODE_FIX = 'install Node.js 20 or later (nodejs.org), then press k'
+const NODE_FIX = 'install Node.js 20 or newer from nodejs.org, then press k'
+
+const SIGN_IN = 'gcloud auth login, then gcloud auth application-default login'
 
 /** How to get pnx when it is missing or too old, from what pnx-fast-dev said about its last try. */
 function pnxFix(needs: Needs, isMissing: boolean): string {
-  if (needs.problem === 'auth') return 'sign in for the npm registry: gcloud auth application-default login, then restart Claude Code'
-  if (needs.problem === 'access') return 'ask a PlatformNEX admin for read access to the PlatformNEX npm registry'
-  if (!needs.fastDevRan) return 'add the pnx-fast-dev Ability (it installs pnx), then restart Claude Code'
+  // The registry's newest is older than dev cycles need: no install or sign-in helps until it is released.
+  if (needs.released !== '' && !isAtLeast(needs.released)) return `pnx ${MIN_PNX} isn't released yet; it installs by itself once it is`
+  if (needs.problem === 'auth') return `sign in to Google: ${SIGN_IN}, then restart Claude Code`
+  if (needs.problem === 'access') return `sign in with your work Google account (${SIGN_IN}) and restart Claude Code. Still failing? Ask a PlatformNEX admin`
+  if (needs.problem === 'network') return "can't download pnx: check your internet or VPN, then restart Claude Code"
+  if (needs.problem === 'install') return "pnx didn't install (details in ~/.config/pnx/install.log): restart Claude Code to try again"
+  if (!needs.fastDevRan) return 'add the pnx-fast-dev plugin (it installs pnx), then restart Claude Code'
 
-  return isMissing ? 'pnx-fast-dev installs it in the background: restart Claude Code in a few minutes' : 'pnx-fast-dev updates it once a day; to update now: npm i -g @platformnex/pnx'
+  // pnx-fast-dev installs or updates it at the next start (WANT_PNX lifts its once-a-day wait).
+  return isMissing ? 'it installs by itself: restart Claude Code in a few minutes' : 'it updates by itself: restart Claude Code'
 }
 
 /**
@@ -137,7 +157,7 @@ function pnxFix(needs: Needs, isMissing: boolean): string {
  * what to do about the missing ones, and why the last try stopped.
  */
 export function devCycleSteps(w: { isOff: boolean; status: ClaudeCode['status']; note?: string; needs?: Needs; pnx: { cli?: string; version?: string } }): CheckStep[] {
-  if (w.isOff) return [{ label: 'Dev cycles', ok: undefined, detail: "turned off in this plugin's settings" }]
+  if (w.isOff) return [{ label: 'Dev cycles', ok: undefined, detail: 'turned off in settings' }]
   if (w.status === 'online') return [{ label: 'Dev cycles', ok: true, detail: 'your Claude Code is online' }]
   const needs = w.needs
   if (needs === undefined) return [{ label: 'Node.js', ok: false, detail: 'not found', fix: NODE_FIX }]
@@ -149,14 +169,16 @@ export function devCycleSteps(w: { isOff: boolean; status: ClaudeCode['status'];
       : isAtLeast(w.pnx.version)
         ? { label: 'pnx', ok: true, detail: w.pnx.version ?? '' }
         : { label: 'pnx', ok: false, detail: `${w.pnx.version ?? '?'} is too old (needs ${MIN_PNX})`, fix: pnxFix(needs, false) },
-    needs.git ? { label: 'git', ok: true, detail: 'installed' } : { label: 'git', ok: false, detail: 'not found', fix: 'install git (git-scm.com)' },
+    needs.git ? { label: 'git', ok: true, detail: 'installed' } : { label: 'git', ok: false, detail: 'not found', fix: 'install git from git-scm.com' },
     !needs.gh
-      ? { label: 'gh', ok: false, detail: 'not found (coding jobs need it)', fix: 'install the GitHub CLI (cli.github.com), then run: gh auth login' }
+      ? { label: 'gh', ok: false, detail: 'not installed (needed for pull requests)', fix: 'install the GitHub CLI from cli.github.com, then run: gh auth login' }
       : needs.ghSignedIn
         ? { label: 'gh', ok: true, detail: 'signed in' }
-        : { label: 'gh', ok: false, detail: 'not signed in (coding jobs need it)', fix: 'run: gh auth login' },
+        : { label: 'gh', ok: false, detail: 'not signed in (needed for pull requests)', fix: 'run: gh auth login' },
   ]
-  if (w.note !== undefined) steps.push({ label: 'last try', ok: undefined, detail: w.note })
+  // Why the last try stopped, unless a Node.js or pnx failure above already says it (git and gh never stop the worker).
+  const isExplained = steps.some(s => (s.label === 'Node.js' || s.label === 'pnx') && s.ok === false)
+  if (w.note !== undefined && !isExplained) steps.push({ label: 'last try', ok: undefined, detail: w.note })
 
   return steps
 }

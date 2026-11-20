@@ -34,7 +34,7 @@ import {
 } from './lib'
 import { OWN_PREFIX, handoffUrl, parseAsk, pickActiveMatch, pushAsk, scrub } from './skills'
 import { ENVIRONMENTS, FIND_CLAUDE, PLUGIN_ID, apiKeysUrl, baseOf, configureInput, environmentOf, extractKey, type EnvironmentId } from './setup'
-import { ALREADY_RUNNING_EXIT, FIND_DEVICE, FIND_NEEDS, FIND_PNX, MIN_PNX, MISSING_RETRY_MS, RETRY_MS, catalogUrlOf, devCycleSteps, endedNote, isAtLeast, isTakingJobs, lineNote, parseDeviceId, parseFind, parseNeeds, sessionEndAction } from './worker'
+import { ALREADY_RUNNING_EXIT, FIND_DEVICE, FIND_NEEDS, FIND_PNX, MIN_PNX, MISSING_RETRY_MS, RETRY_MS, WANT_PNX, catalogUrlOf, devCycleSteps, endedNote, isAtLeast, isTakingJobs, lineNote, parseDeviceId, parseFind, parseNeeds, sessionEndAction } from './worker'
 import type { Ask, Asks, CheckGroup, ClaudeCode, Data, Match, RepoView, Ui } from '../types'
 
 const PANE = 'pnx-context'
@@ -141,6 +141,8 @@ const startWorker = async ($: EngineInterface, cfg: Cfg): Promise<void> => {
       nextWorkerTry = now + MISSING_RETRY_MS
       const why = found.cli === undefined ? 'pnx is not installed' : `pnx ${found.version} is too old (needs ${MIN_PNX}+)`
       logWorker($, why)
+      // Tells pnx-fast-dev which pnx is needed, so it checks at every start until it has it, not once a day.
+      await $.process.run(['node', '-e', WANT_PNX], { timeoutMs: 10_000 }).catch(() => undefined)
       await setClaudeCode($, 'offline', why)
 
       return
@@ -248,7 +250,7 @@ const lookup = async ($: EngineInterface, cfg: Cfg, remote: string, force: boole
 
     return entry
   } catch (error) {
-    const entry = { at: now, failed: error instanceof ApiFailure && error.status === 404 ? 'this PlatformNEX does not have the repo lookup yet' : failure(error) }
+    const entry = { at: now, failed: error instanceof ApiFailure && error.status === 404 ? "this PlatformNEX can't look up repos yet" : failure(error) }
     if (started === connection) lookups.set(key, entry)
 
     return entry
@@ -296,13 +298,18 @@ const loadDetail = async ($: EngineInterface, cfg: Cfg, match: ParsedMatch, forc
 
 const refresh = async ($: EngineInterface, cfg: Cfg | undefined, force: boolean): Promise<void> => {
   if (isBusy) {
-    // A tick can wait for the next one; a forced refresh (a new connection, say) must not be lost.
-    if (force) queued = { cfg, at: connection }
+    // A tick can wait for the next one; a forced refresh (a new connection, ⟳) must not be lost, and shows as waiting.
+    if (force) {
+      queued = { cfg, at: connection }
+      await update($, ui, u => ({ ...u, isRefreshing: true })).catch(() => undefined)
+    }
 
     return
   }
   isBusy = true
   const started = connection
+  // The pane says "refreshing…" until this ends, so a ⟳ press shows at once even when nothing on screen changes.
+  await update($, ui, u => ({ ...u, isRefreshing: true })).catch(() => undefined)
   try {
     const now = await $.clock.now()
     if (cfg === undefined) {
@@ -360,6 +367,7 @@ const refresh = async ($: EngineInterface, cfg: Cfg | undefined, force: boolean)
     const next = queued
     queued = undefined
     if (next !== undefined && next.at === connection) void refresh($, next.cfg, true)
+    else await update($, ui, u => ({ ...u, isRefreshing: false })).catch(() => undefined)
   }
 }
 
@@ -375,7 +383,7 @@ const saveKey = async ($: EngineInterface, pasted: string, env: EnvironmentId, p
   await update($, ui, u => ({ ...u, setupDone: [] }))
   const key = extractKey(pasted)
   if (key === undefined) {
-    await setupNote($, "That doesn't look like a PlatformNEX key (it starts with pnx_). Copy it again from the portal.", 'error')
+    await setupNote($, "That doesn't look like a PlatformNEX key (it starts with pnx_). Copy it again.", 'error')
 
     return false
   }
@@ -413,7 +421,7 @@ const saveKey = async ($: EngineInterface, pasted: string, env: EnvironmentId, p
 
     return true
   } catch (error) {
-    await setupNote($, `Could not finish setup: ${error instanceof Error ? lineNote(error.message) ?? 'unknown error' : 'unknown error'}`, 'error')
+    await setupNote($, `Setup didn't finish: ${error instanceof Error ? lineNote(error.message) ?? 'unknown error' : 'unknown error'}`, 'error')
 
     return false
   }
@@ -599,7 +607,7 @@ const formatSteps = (steps: CheckStep[]): string =>
 const checkText = async ($: EngineInterface, options: Options): Promise<string> => {
   const r = await checkResult($, options)
   const all = [...r.key, ...r.lookup]
-  const summary = ['PlatformNEX check', '', formatSteps(all), '', r.isReady ? 'Ready. Open the pane with /pnx-context.' : 'Not ready yet: fix the first ✗ above, restart Claude Code, then run /pnx-context check again.']
+  const summary = ['PlatformNEX check', '', formatSteps(all), '', r.isReady ? 'Ready. Open the pane with /pnx-context.' : 'Not ready yet: fix the first ✗ above, then run /pnx-context check again.']
 
   return (r.dev === undefined ? summary : [...summary, '', 'Dev cycles', formatSteps(r.dev), ...(r.isRetrying ? ['  · connecting now'] : [])]).join('\n')
 }
@@ -613,7 +621,7 @@ const checkResult = async ($: EngineInterface, options: Options): Promise<CheckR
   const base = safeBaseUrl(url)
   const steps: CheckStep[] = [
     { label: 'URL set', ok: url !== '', detail: url === '' ? 'not set' : url, fix: url === '' ? 'run /pnx-context setup' : undefined },
-    { label: 'URL is https', ok: url === '' ? undefined : base !== undefined, detail: base !== undefined ? 'yes' : url === '' ? 'skipped' : 'it must look like https://host, with no path', fix: url !== '' && base === undefined ? 'set the baseUrl option again' : undefined },
+    { label: 'URL is https', ok: url === '' ? undefined : base !== undefined, detail: base !== undefined ? 'yes' : url === '' ? 'skipped' : 'it must look like https://host, with no path', fix: url !== '' && base === undefined ? 'run /pnx-context setup' : undefined },
     { label: 'API key set', ok: key !== '', detail: key === '' ? 'not set' : '(hidden)', fix: key === '' ? 'run /pnx-context setup' : undefined },
     { label: 'key format', ok: key === '' ? undefined : key.startsWith('pnx_'), detail: key === '' ? 'skipped' : key.startsWith('pnx_') ? 'looks right' : 'a personal key starts with pnx_', fix: key !== '' && !key.startsWith('pnx_') ? 'create a key in the portal (user menu, API keys)' : undefined },
   ]
@@ -659,7 +667,7 @@ const runCheck = async ($: EngineInterface, options: Options): Promise<void> => 
     // A check of a connection dropped meanwhile is not this one's: the pane shows none rather than that.
     await update($, ui, u => ({ ...u, check: started === connection ? { groups, isReady: r.isReady } : undefined }))
   } catch {
-    await update($, ui, u => ({ ...u, check: started === connection ? { groups: [], isReady: false, note: 'Could not run the check.' } : undefined }))
+    await update($, ui, u => ({ ...u, check: started === connection ? { groups: [], isReady: false, note: "The check couldn't run. Press k to try again." } : undefined }))
   }
 }
 
@@ -972,7 +980,7 @@ export const register: Register = (on, options) => {
       // The environment picked here, else the key's or the saved address's, else production.
       const env: EnvironmentId = u.setupEnv ?? environmentOf(cfg?.base ?? safeBaseUrl(urlOf(options))) ?? 'prod'
       const why = isKeyRefused
-        ? `${labelOf(cfg.base)} didn't accept the saved API key (revoked or expired?). Create a new one and paste it here.`
+        ? `Your API key no longer works on ${labelOf(cfg.base)} (expired or revoked). Create a new one and paste it here.`
         : isSavedKeyMalformed
           ? "The saved API key isn't a PlatformNEX key (it starts with pnx_). Paste a new one."
           : undefined
@@ -1137,8 +1145,8 @@ export const register: Register = (on, options) => {
           <Box flexDirection="row" gap={1}>
             <Button
               key="refresh"
-              label="refresh (r)"
               plain
+              dimColor={u.isRefreshing === true}
               hotkey="r"
               onPress={act(async () => {
                 // A fresh connection: sign in again with the key (a refused one goes back to setup) and read everything
@@ -1157,7 +1165,6 @@ export const register: Register = (on, options) => {
             </Button>
             <Button
               key="check"
-              label="check (k)"
               plain
               hotkey="k"
               onPress={act(async () => {
@@ -1170,7 +1177,6 @@ export const register: Register = (on, options) => {
             {u.connOpen !== true && (
               <Button
                 key="conn-open"
-                label="change (s)"
                 plain
                 hotkey="s"
                 onPress={act(() => update($, ui, x => ({ ...x, connOpen: true, confirmDisconnect: false, check: undefined, setupEnv: undefined, setupNote: undefined, setupDone: undefined })))}
@@ -1181,7 +1187,7 @@ export const register: Register = (on, options) => {
           </Box>
         </Box>
         {/* The terminal draws each hotkey beside its icon (r: ⟳); elsewhere one dim line says what the icons do. */}
-        {!isTerminal && <Text dimColor>{cap('r refresh · k check · s change', columns)}</Text>}
+        {!isTerminal && <Text dimColor>{cap(`r refresh · k check${u.connOpen === true ? '' : ' · s change'}`, columns)}</Text>}
         {/* Two things that can fail apart: Claude Code reaching PlatformNEX with the key, and PlatformNEX reaching this
             Claude Code for dev-cycle jobs. Neither depends on the repository. */}
         <Box flexDirection="row">
@@ -1207,7 +1213,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column" alignItems="center">
           <Text dimColor>
             {cap(
-              `${active === undefined ? '' : `${active.name}${active.branch === undefined ? '' : ` · ${cap(active.branch, 30)}`} · `}${matched} of ${d.repos.length} repos · ${ago(d.at, now)}`,
+              `${active === undefined ? '' : `${active.name}${active.branch === undefined ? '' : ` · ${cap(active.branch, 30)}`} · `}${matched} of ${d.repos.length} repos · ${u.isRefreshing === true ? 'refreshing…' : `updated ${ago(d.at, now)}`}`,
               columns * 2,
             )}
           </Text>
@@ -1425,7 +1431,7 @@ export const register: Register = (on, options) => {
 
         {active === undefined && d.repos.length === 0 && <Text dimColor>No git repository found here.</Text>}
         {active !== undefined && active.lookup === 'none' && <Text dimColor>Not in the PlatformNEX catalog, or not visible to you.</Text>}
-        {active !== undefined && active.lookup === 'error' && <Text color="error">Could not look this repository up.</Text>}
+        {active !== undefined && active.lookup === 'error' && <Text color="error">Couldn't look up this repo. Press ⟳ to try again.</Text>}
 
         {current !== undefined && active !== undefined && (
           <Box flexDirection="column">
