@@ -39,9 +39,10 @@ failed() {
   rm -f "$STAMP"
 }
 
-# Whether version $1 is newer than $2 (plain x.y.z; a missing one counts as 0.0.0).
+# Whether version $1 is newer than $2: x.y.z by number, and a release is newer than its own pre-release (0.2.0 is
+# newer than 0.2.0-rc.1). A missing or unreadable version counts as 0.0.0.
 newer() {
-  node -e "const [a,b]=process.argv.slice(1).map(v=>(v||'0.0.0').split('.').map(Number));process.exit((a[0]-b[0]||a[1]-b[1]||a[2]-b[2])>0?0:1)" "$1" "$2"
+  node -e "const v=s=>{const[c,pre]=s.split('-');const p=c.split('.');return{n:[0,1,2].map(i=>Number(p[i])||0),pre:pre!==undefined}};const[a,b]=process.argv.slice(1).map(v);const d=a.n[0]-b.n[0]||a.n[1]-b.n[1]||a.n[2]-b.n[2];process.exit(d>0||(d===0&&b.pre&&!a.pre)?0:1)" "$1" "$2"
 }
 
 (

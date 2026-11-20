@@ -318,7 +318,7 @@ test('/pnx-context check says when the server has no repo lookup yet', { options
 
   expect(text).toMatch(/✓ key accepted/)
   expect(text).toMatch(/✗ lookup route\s+this PlatformNEX can't look up repos yet/)
-  expect(text).toMatch(/ask the platform team to deploy the by-repo route/)
+  expect(text).toMatch(/ask the PlatformNEX team, or switch environment/)
   expect(text).toMatch(/Not ready yet/)
 })
 
@@ -790,6 +790,34 @@ test('on Windows the repositories under the folder are found by listing it', { o
 
   expect((await ui.find({ type: 'Text', text: /repos ·/ }))?.text).toMatch(/of 2 repos/)
   await ui.unmount()
+})
+
+test('a very broad folder is searched only so far, so a refresh never hangs on it', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-11-17T09:30:00Z') })
+  const sent: Sent[] = []
+  stubWorld(on, sent, { scan: '' })
+  // Every folder holds 40 more (a home folder or a drive): 1 + 40 + 1600 folders two levels deep.
+  let reads = 0
+  let most = 0
+  on('session.repo', async (_, e, next) => {
+    // Each scan asks this first: count its folder reads on their own.
+    reads = 0
+
+    return next(e)
+  })
+  on('fs.list', () => {
+    reads += 1
+    most = Math.max(most, reads)
+
+    return { value: Array.from({ length: 40 }, (_, i) => ({ name: `d${i}`, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })) }
+  })
+
+  await $.session.start({ cwd: '/w/gateway', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+
+  // Every folder one level down was read (repositories are usually there), and the search stopped at its cap.
+  expect(most).toBeGreaterThan(41)
+  expect(most).toBeLessThanOrEqual(500)
 })
 
 test('a refresh still running for the old connection never shows its data after a switch', { options: OPTIONS }, async ($, on) => {

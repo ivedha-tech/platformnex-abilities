@@ -67,6 +67,9 @@ const claudeCode = atom({ plugin: 'pnx-context', key: 'claudeCode' } as const, {
 // under the session's folder, as `find -maxdepth 3 -name .git` did.
 const SCAN_DEPTH = 2
 const MAX_REPOS = 80
+// A broad folder (a home folder, a drive) must not hold the refresh: at most this many folders read, for this long.
+const MAX_SCAN_DIRS = 500
+const SCAN_BUDGET_MS = 10_000
 const SCAN_SKIP = new Set(['.git', 'node_modules', '.terraform'])
 // Repositories read by git at once: enough to be quick, few enough not to flood a slow machine.
 const GIT_BATCH = 8
@@ -192,19 +195,35 @@ const startWorker = async ($: EngineInterface, cfg: Cfg): Promise<void> => {
   }
 }
 
-/** The folders under `dir` (itself included) that hold `.git`, SCAN_DEPTH folders deep, at most MAX_REPOS. */
+/**
+ * The folders under `dir` (itself included) that hold `.git`, SCAN_DEPTH folders deep, at most MAX_REPOS. One level at
+ * a time, so the folders right under `dir` (where repositories usually are) are read first; it stops at MAX_SCAN_DIRS
+ * folders read or SCAN_BUDGET_MS, keeping what it found.
+ */
 const findRepos = async ($: EngineInterface, dir: string): Promise<string[]> => {
   const found: string[] = []
-  const walk = async (path: string, depth: number): Promise<void> => {
-    if (found.length >= MAX_REPOS) return
-    // A folder that can't be read (no access, gone meanwhile) is skipped, as find skipped it.
-    const entries = await $.fs.list(path).catch(() => [])
-    if (entries.some(e => e.name === '.git')) found.push(path)
-    if (depth >= SCAN_DEPTH) return
-    // Symbolic links are `other`, so they are not followed, as find does not follow them.
-    for (const entry of entries) if (entry.kind === 'dir' && !SCAN_SKIP.has(entry.name)) await walk(`${path === '/' || path.endsWith(':/') ? path : `${path}/`}${entry.name}`, depth + 1)
+  const deadline = (await $.clock.now()) + SCAN_BUDGET_MS
+  let reads = 0
+  let level = [normalizePath(dir)]
+  for (let depth = 0; depth <= SCAN_DEPTH && level.length > 0; depth += 1) {
+    const next: string[] = []
+    for (const path of level) {
+      const left = deadline - (await $.clock.now())
+      if (found.length >= MAX_REPOS || reads >= MAX_SCAN_DIRS || left <= 0) return found
+      reads += 1
+      // One read can hang (a cloud-synced or network folder): it gets only the time left, then the search ends there.
+      const stop = new AbortController()
+      const timeUp = $.clock.sleep(left, { signal: stop.signal }).then(() => undefined, () => undefined)
+      // A folder that can't be read (no access, gone meanwhile) is skipped, as find skipped it.
+      const entries = await Promise.race([$.fs.list(path).catch(() => []), timeUp])
+      stop.abort()
+      if (entries === undefined) return found
+      if (entries.some(e => e.name === '.git')) found.push(path)
+      // Symbolic links are `other`, so they are not followed, as find does not follow them.
+      if (depth < SCAN_DEPTH) for (const e of entries) if (e.kind === 'dir' && !SCAN_SKIP.has(e.name)) next.push(`${path === '/' || path.endsWith(':/') ? path : `${path}/`}${e.name}`)
+    }
+    level = next
   }
-  await walk(normalizePath(dir), 0)
 
   return found
 }
@@ -296,12 +315,16 @@ const loadDetail = async ($: EngineInterface, cfg: Cfg, match: ParsedMatch, forc
   return out
 }
 
+// "refreshing…" in the pane, worked out when the write is applied, not when it was asked for: a refresh running or one
+// waiting. So writes that land out of order still end on what is true, and the last refresh's own write clears it.
+const showRefreshing = ($: EngineInterface) => update($, ui, u => ({ ...u, isRefreshing: isBusy || queued !== undefined })).catch(() => undefined)
+
 const refresh = async ($: EngineInterface, cfg: Cfg | undefined, force: boolean): Promise<void> => {
   if (isBusy) {
     // A tick can wait for the next one; a forced refresh (a new connection, ⟳) must not be lost, and shows as waiting.
     if (force) {
       queued = { cfg, at: connection }
-      await update($, ui, u => ({ ...u, isRefreshing: true })).catch(() => undefined)
+      await showRefreshing($)
     }
 
     return
@@ -309,7 +332,7 @@ const refresh = async ($: EngineInterface, cfg: Cfg | undefined, force: boolean)
   isBusy = true
   const started = connection
   // The pane says "refreshing…" until this ends, so a ⟳ press shows at once even when nothing on screen changes.
-  await update($, ui, u => ({ ...u, isRefreshing: true })).catch(() => undefined)
+  await showRefreshing($)
   try {
     const now = await $.clock.now()
     if (cfg === undefined) {
@@ -367,7 +390,7 @@ const refresh = async ($: EngineInterface, cfg: Cfg | undefined, force: boolean)
     const next = queued
     queued = undefined
     if (next !== undefined && next.at === connection) void refresh($, next.cfg, true)
-    else await update($, ui, u => ({ ...u, isRefreshing: false })).catch(() => undefined)
+    else await showRefreshing($)
   }
 }
 
