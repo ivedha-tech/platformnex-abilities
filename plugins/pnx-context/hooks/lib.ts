@@ -44,18 +44,28 @@ export const safeBaseUrl = (value: unknown): string | undefined => {
 
 export type ScannedRepo = { root: string; remote?: string; branch?: string; head?: string }
 
-/** Reads the scan script's tab-separated lines: folder, remote, branch, short sha. */
-export const parseScan = (stdout: string): ScannedRepo[] =>
-  stdout
-    .split('\n')
-    .map(line => line.split('\t'))
-    .filter(parts => parts.length >= 1 && (parts[0] ?? '').startsWith('/'))
-    .map(([root = '', remote = '', branch = '', head = '']) => ({
-      root,
-      remote: remote.trim() === '' ? undefined : cleanRemote(remote),
-      branch: branch.trim() === '' || branch.trim() === 'HEAD' ? undefined : branch.trim(),
-      head: head.trim() === '' ? undefined : head.trim(),
-    }))
+/**
+ * One spelling of a folder on every OS, for comparing and keeping: forward slashes, a lower-case drive letter, no
+ * trailing slash (`C:\work\x\` → `c:/work/x`). macOS and Linux paths pass through unchanged.
+ */
+export const normalizePath = (path: string): string => {
+  const slashed = path.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, drive: string) => `${drive.toLowerCase()}:`)
+  const trimmed = slashed.replace(/\/+$/, '')
+
+  // A root keeps its slash: `/`, `c:/`.
+  return trimmed === '' ? '/' : /^[a-z]:$/.test(trimmed) ? `${trimmed}/` : trimmed
+}
+
+/** Whether a path is absolute on any OS: `/home/x`, `C:\x`, `c:/x` or a `\\server\share` path. */
+export const isAbsolutePath = (path: string): boolean => /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(path)
+
+/** What the repository scan read for one folder (with git): its remote, branch and short commit. */
+export const scannedRepo = (root: string, remote: string, branch: string, head: string): ScannedRepo => ({
+  root: normalizePath(root),
+  remote: remote.trim() === '' ? undefined : cleanRemote(remote),
+  branch: branch.trim() === '' || branch.trim() === 'HEAD' ? undefined : branch.trim(),
+  head: head.trim() === '' ? undefined : head.trim(),
+})
 
 /**
  * One entry for each distinct remote (a worktree repeats its repository); the shortest path wins,
@@ -72,13 +82,28 @@ export const dedupeByRemote = (repos: ScannedRepo[], cwd?: string): ScannedRepo[
   return [...seen.values()]
 }
 
-/** The repository whose folder contains this path, the deepest one when they nest. */
-export const rootContaining = (path: string, roots: string[]): string | undefined =>
-  [...roots]
-    .sort((a, b) => b.length - a.length)
-    .find(root => path === root || path.startsWith(root.endsWith('/') ? root : `${root}/`))
+/**
+ * The repository whose folder contains this path, the deepest one when they nest; the root as `roots` spells it.
+ * Either may be spelled the Windows way (`C:\work\x`); Windows paths compare without regard to case, as Windows does.
+ */
+export const rootContaining = (path: string, roots: string[]): string | undefined => {
+  const comparable = (p: string) => {
+    const n = normalizePath(p)
 
-export const baseName = (path: string): string => path.replace(/\/+$/, '').split('/').pop() ?? path
+    return /^[a-z]:/.test(n) ? n.toLowerCase() : n
+  }
+  const target = comparable(path)
+
+  return [...roots]
+    .sort((a, b) => b.length - a.length)
+    .find(root => {
+      const r = comparable(root)
+
+      return target === r || target.startsWith(r.endsWith('/') ? r : `${r}/`)
+    })
+}
+
+export const baseName = (path: string): string => normalizePath(path).split('/').pop() || path
 
 /** `https://host/x` JSON with either envelope: `{success, data}` or the body itself. */
 export const unwrap = (text: string): unknown => {

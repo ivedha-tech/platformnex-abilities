@@ -13,18 +13,20 @@ import {
   dedupeByRemote,
   healthLabel,
   healthTone,
+  isAbsolutePath,
   isRepoUrl,
+  normalizePath,
   normalizeRepoUrl,
   parseBuilds,
   parseByRepo,
   parseHealth,
   parseReleases,
-  parseScan,
   passRate,
   parseSeries,
   releaseBlock,
   rootContaining,
   safeBaseUrl,
+  scannedRepo,
   spark,
   systemPath,
   type ParsedMatch,
@@ -47,8 +49,6 @@ const MAX_MATCHES = 3
 const PAGE_SIZE = 8
 // Width of the label column in the header's two status rows (✓ PlatformNEX, ● Dev cycles), so their values line up.
 const STATUS_LABEL = 16
-// Width of the header's action buttons (⟳, ✓ check), mirrored by an empty column so the title sits in the middle.
-const HEADER_ACTIONS = 20
 
 const EMPTY_DATA: Data = { at: 0, status: 'unconfigured', repos: [] }
 const EMPTY_UI: Ui = {}
@@ -62,13 +62,14 @@ const asks = atom({ plugin: 'pnx-context', key: 'asks' } as const, EMPTY_ASKS, {
 // Whether this machine's Claude Code takes dev-cycle jobs now (one line in the pane), and why the last try stopped (for the check).
 const claudeCode = atom({ plugin: 'pnx-context', key: 'claudeCode' } as const, { status: 'connecting' } as ClaudeCode, { shape: 'claude-code-1' })
 
-// Every repository under the folder the session is in, one line each: folder, remote, branch, short sha.
-const SCAN =
-  'find "$PWD" -maxdepth 3 \\( -name node_modules -o -name .terraform \\) -prune -o -name .git -print 2>/dev/null | head -80 | ' +
-  'while read -r g; do d=$(dirname "$g"); ' +
-  'printf \'%s\\t%s\\t%s\\t%s\\n\' "$d" "$(git -C "$d" remote get-url origin 2>/dev/null)" "$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null)" "$(git -C "$d" rev-parse --short HEAD 2>/dev/null)"; done'
-const ONE =
-  'd="$1"; printf \'%s\\t%s\\t%s\\t%s\\n\' "$d" "$(git -C "$d" remote get-url origin 2>/dev/null)" "$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null)" "$(git -C "$d" rev-parse --short HEAD 2>/dev/null)"'
+// The repository scan: no shell (Windows has no `sh` on PATH), only the file system and `git` itself, which every OS
+// runs directly. A folder holding `.git` (a folder, or a worktree's file) is a repository, looked for two folders deep
+// under the session's folder, as `find -maxdepth 3 -name .git` did.
+const SCAN_DEPTH = 2
+const MAX_REPOS = 80
+const SCAN_SKIP = new Set(['.git', 'node_modules', '.terraform'])
+// Repositories read by git at once: enough to be quick, few enough not to flood a slow machine.
+const GIT_BATCH = 8
 
 // Held in the module (a hot reload starts them over, which only costs one refresh).
 let scan: { cwd: string; at: number; repos: ScannedRepo[] } | undefined
@@ -189,14 +190,46 @@ const startWorker = async ($: EngineInterface, cfg: Cfg): Promise<void> => {
   }
 }
 
+/** The folders under `dir` (itself included) that hold `.git`, SCAN_DEPTH folders deep, at most MAX_REPOS. */
+const findRepos = async ($: EngineInterface, dir: string): Promise<string[]> => {
+  const found: string[] = []
+  const walk = async (path: string, depth: number): Promise<void> => {
+    if (found.length >= MAX_REPOS) return
+    // A folder that can't be read (no access, gone meanwhile) is skipped, as find skipped it.
+    const entries = await $.fs.list(path).catch(() => [])
+    if (entries.some(e => e.name === '.git')) found.push(path)
+    if (depth >= SCAN_DEPTH) return
+    // Symbolic links are `other`, so they are not followed, as find does not follow them.
+    for (const entry of entries) if (entry.kind === 'dir' && !SCAN_SKIP.has(entry.name)) await walk(`${path === '/' || path.endsWith(':/') ? path : `${path}/`}${entry.name}`, depth + 1)
+  }
+  await walk(normalizePath(dir), 0)
+
+  return found
+}
+
+/** One repository's remote, branch and short commit, from git run directly (no shell); a part git can't answer is left out. */
+const readRepo = async ($: EngineInterface, root: string): Promise<ScannedRepo> => {
+  const git = (...args: string[]) =>
+    $.process
+      .run(['git', '-C', root, ...args], { timeoutMs: 10_000 })
+      .then(r => (r.exitCode === 0 ? r.stdout.trim() : ''))
+      .catch(() => '')
+  const [remote, branch, head] = await Promise.all([git('remote', 'get-url', 'origin'), git('rev-parse', '--abbrev-ref', 'HEAD'), git('rev-parse', '--short', 'HEAD')])
+
+  return scannedRepo(root, remote, branch, head)
+}
+
 const discover = async ($: EngineInterface, force: boolean): Promise<{ cwd: string; repos: ScannedRepo[] }> => {
   const cwd = await $.session.cwd()
   const now = await $.clock.now()
   if (!force && scan !== undefined && scan.cwd === cwd && now - scan.at < SCAN_MS) return { cwd, repos: scan.repos }
 
+  // In a repository, only that one; else every repository under the folder.
   const repo = await $.session.repo()
-  const ran = await $.process.run(repo === null ? ['sh', '-c', SCAN] : ['sh', '-c', ONE, 'sh', repo.root], { timeoutMs: 20_000 }).catch(() => undefined)
-  const repos = dedupeByRemote(ran === undefined ? [] : parseScan(ran.stdout), cwd)
+  const roots = repo === null ? await findRepos($, cwd) : [repo.root]
+  const found: ScannedRepo[] = []
+  for (let i = 0; i < roots.length; i += GIT_BATCH) found.push(...(await Promise.all(roots.slice(i, i + GIT_BATCH).map(root => readRepo($, root)))))
+  const repos = dedupeByRemote(found, cwd)
   scan = { cwd, at: now, repos }
 
   return { cwd, repos }
@@ -743,7 +776,7 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     try {
       const path = (e as unknown as { file_path?: unknown }).file_path
-      if (typeof path === 'string' && path.startsWith('/')) {
+      if (typeof path === 'string' && isAbsolutePath(path)) {
         const root = rootContaining(path, (await read($, data)).repos.map(r => r.root))
         if (root !== undefined && root !== (await read($, ui)).touchedRoot) await update($, ui, u => ({ ...u, touchedRoot: root }))
       }
@@ -759,7 +792,6 @@ export const register: Register = (on, options) => {
     // The terminal draws a Button's hotkey itself (`k: check`) and a link's address under its label; elsewhere neither
     // is drawn, so the hotkey goes in the label and a link keeps a short label.
     const isTerminal = e.surface === 'terminal'
-    const hint = (label: string, key: string): string => (isTerminal ? label : `${label} (${key})`)
     const lead = (key: string, label: string): string => (isTerminal ? label : `${key} ${label}`)
     // The saved settings, or the key just saved from this pane.
     const cfg = activeCfg()
@@ -1098,16 +1130,14 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column">
-        {/* Header: the title in the middle (an empty column on the left as wide as the buttons on the right), then the
-            connection, then under a rule the repository in view. */}
-        <Box flexDirection="row">
-          <Box width={HEADER_ACTIONS} />
-          <Box flexGrow={1} justifyContent="center">
-            <Text bold>PLATFORMNEX</Text>
-          </Box>
-          <Box width={HEADER_ACTIONS} flexDirection="row" justifyContent="flex-end" gap={1}>
+        {/* Header: the title on the left, icon buttons on the right (one row at any width); then the connection, then
+            under a rule the repository in view. */}
+        <Box flexDirection="row" justifyContent="space-between">
+          <Text bold>PLATFORMNEX</Text>
+          <Box flexDirection="row" gap={1}>
             <Button
               key="refresh"
+              label="refresh (r)"
               plain
               hotkey="r"
               onPress={act(async () => {
@@ -1127,6 +1157,7 @@ export const register: Register = (on, options) => {
             </Button>
             <Button
               key="check"
+              label="check (k)"
               plain
               hotkey="k"
               onPress={act(async () => {
@@ -1134,27 +1165,28 @@ export const register: Register = (on, options) => {
                 await runCheck($, checkOptions())
               })}
             >
-              {hint('✓ check', 'k')}
+              ✓
             </Button>
+            {u.connOpen !== true && (
+              <Button
+                key="conn-open"
+                label="change (s)"
+                plain
+                hotkey="s"
+                onPress={act(() => update($, ui, x => ({ ...x, connOpen: true, confirmDisconnect: false, check: undefined, setupEnv: undefined, setupNote: undefined, setupDone: undefined })))}
+              >
+                ⚙
+              </Button>
+            )}
           </Box>
         </Box>
+        {/* The terminal draws each hotkey beside its icon (r: ⟳); elsewhere one dim line says what the icons do. */}
+        {!isTerminal && <Text dimColor>{cap('r refresh · k check · s change', columns)}</Text>}
         {/* Two things that can fail apart: Claude Code reaching PlatformNEX with the key, and PlatformNEX reaching this
             Claude Code for dev-cycle jobs. Neither depends on the repository. */}
-        <Box flexDirection="row" justifyContent="space-between">
-          <Box flexDirection="row">
-            <Text color="success">{'✓ PlatformNEX'.padEnd(STATUS_LABEL)}</Text>
-            <Text color="success">{cap(`connected to ${envLabel}`, Math.max(8, columns - STATUS_LABEL - 12))}</Text>
-          </Box>
-          {u.connOpen !== true && (
-            <Button
-              key="conn-open"
-              plain
-              hotkey="s"
-              onPress={act(() => update($, ui, x => ({ ...x, connOpen: true, confirmDisconnect: false, check: undefined, setupEnv: undefined, setupNote: undefined, setupDone: undefined })))}
-            >
-              {hint('change', 's')}
-            </Button>
-          )}
+        <Box flexDirection="row">
+          <Text color="success">{'✓ PlatformNEX'.padEnd(STATUS_LABEL)}</Text>
+          <Text color="success">{cap(`connected to ${envLabel}`, Math.max(8, columns - STATUS_LABEL))}</Text>
         </Box>
         {d.status === 'error' && d.error !== undefined && <Text color="error">{cap(d.error, columns * 2)}</Text>}
         {options['devCycles'] !== 'off' && (
