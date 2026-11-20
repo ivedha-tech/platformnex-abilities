@@ -17,6 +17,8 @@ SIGN_IN="gcloud auth login, then gcloud auth application-default login"
 
 command -v npm >/dev/null 2>&1 || exit 0
 mkdir -p "$DIR" 2>/dev/null || exit 0
+# Run npm and npx from our own folder: from the session's repo, its .npmrc or node_modules/.bin would be used.
+cd "$DIR" || exit 0
 
 # Once a day (PNX_ENSURE_FORCE=1 skips the wait), or at every start while a needed version hasn't arrived yet.
 if [ -z "${PNX_ENSURE_FORCE:-}" ] && [ ! -f "$WANTED" ] && [ -f "$STAMP" ] && [ -n "$(find "$STAMP" -mtime -1 2>/dev/null)" ]; then exit 0; fi
